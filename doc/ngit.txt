@@ -1,0 +1,133 @@
+*ngit.txt*                    A fast, review-first Git interface for Neovim
+
+==============================================================================
+CONTENTS                                                        *ngit-contents*
+
+1. Introduction...............................................|ngit-introduction|
+2. Commands.........................................................|ngit-commands|
+3. Mappings.........................................................|ngit-mappings|
+4. Configuration.................................................|ngit-configure|
+5. Safety and performance...........................................|ngit-safety|
+
+==============================================================================
+1. INTRODUCTION                                               *ngit-introduction*
+
+ngit displays changed files and a lazy-loaded unified diff in a dedicated
+tabpage. Its primary workflow is reviewing, navigating, staging, and unstaging
+changes without leaving Neovim.
+
+Requirements:
+  - Neovim 0.10 or newer
+  - Git
+
+==============================================================================
+2. COMMANDS                                                       *ngit-commands*
+
+                                                              *:NGit*
+:NGit [directory]
+        Open ngit for the repository containing [directory]. Without an
+        argument, use the current buffer and then the current working
+        directory. If a view is already open, focus it.
+
+                                                              *:NGitRefresh*
+:NGitRefresh
+        Refresh the active repository view.
+
+                                                              *:NGitClose*
+:NGitClose
+        Close the active view and return to the previous tabpage.
+
+==============================================================================
+3. MAPPINGS                                                       *ngit-mappings*
+
+Mappings are local to ngit-owned buffers.
+
+q               Close the view.
+r               Refresh status and the selected diff.
+j               Select the next changed file from the file panel.
+k               Select the previous changed file from the file panel.
+<CR>            Focus the selected diff.
+<Tab>           Select the next changed file.
+<S-Tab>         Select the previous changed file.
+]c              Jump to the next hunk.
+[c              Jump to the previous hunk.
+s               Stage the selected file, or current hunk in the diff.
+u               Unstage the selected file, or current hunk in the diff.
+X               Discard tracked worktree changes after confirmation.
+o               Open the selected file.
+/               Filter the file list.
+<Leader>e       Focus the file panel.
+<Leader>d       Focus the diff panel.
+?               Show contextual help.
+
+==============================================================================
+4. CONFIGURATION                                                 *ngit-configure*
+
+Configuration is optional. Defaults work without calling setup().
+
+>lua
+  require("ngit").setup({
+    context = 3,
+    debounce_ms = 45,
+    refresh_debounce_ms = 120,
+    max_diff_bytes = 2 * 1024 * 1024,
+    cache_entries = 24,
+    file_panel_width = 0.32,
+    file_panel_height = 0.35,
+    auto_refresh = true,
+    confirm_discard = true,
+  })
+<
+
+context
+        Number of context lines generated around each diff hunk.
+
+debounce_ms
+        Delay before loading a newly selected file diff.
+
+refresh_debounce_ms
+        Delay used to coalesce automatic repository refreshes.
+
+max_diff_bytes
+        Soft preview size limit. Hunk actions are disabled for truncated
+        previews.
+
+cache_entries
+        Maximum number of file diffs retained in memory.
+
+file_panel_width
+        A fraction below 1, or an absolute window width.
+
+file_panel_height
+        A fraction below 1, or an absolute file-panel height used when the
+        editor is too narrow for a side-by-side layout.
+
+auto_refresh
+        Refresh an open view after buffer writes, shell commands, and focus
+        changes.
+
+confirm_discard
+        Ask before restoring tracked worktree changes.
+
+signs
+        Text displayed for each file state.
+
+mappings
+        Buffer-local mappings. Set a mapping to false to disable it.
+
+==============================================================================
+5. SAFETY AND PERFORMANCE                                         *ngit-safety*
+
+Git is invoked asynchronously with argument arrays and literal pathspecs.
+Read-only commands avoid optional repository locks. Status is parsed from
+NUL-delimited porcelain-v2 output.
+
+Only the selected file's diff is loaded. Rapid selection changes are
+debounced, superseded diff jobs are terminated, and recent diffs are stored in
+a bounded cache.
+
+Discard only restores tracked worktree files. ngit does not delete untracked
+files.
+
+==============================================================================
+vim:tw=78:ts=8:noet:ft=help:norl:
