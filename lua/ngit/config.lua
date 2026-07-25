@@ -6,8 +6,13 @@ local M = {}
 ---@field refresh_debounce_ms integer Delay used to coalesce repository refreshes.
 ---@field max_diff_bytes integer Soft limit for a preview before it is truncated.
 ---@field cache_entries integer Maximum number of cached file diffs.
+---@field commit_limit integer Number of commits loaded per page.
+---@field layout "dashboard"|"vertical"|"stacked"|"auto" Main pane layout.
 ---@field file_panel_width number|integer Fraction or absolute width of the file panel.
----@field file_panel_height number|integer Fraction or absolute height in stacked layouts.
+---@field file_panel_height number|integer Retained compatibility option.
+---@field diff_layout "auto"|"side_by_side"|"unified" Diff preview arrangement.
+---@field side_by_side_min_width integer Minimum preview width for auto split mode.
+---@field hide_statusline boolean Hide statusline plugin content in ngit windows.
 ---@field auto_refresh boolean Refresh an open view after relevant editor events.
 ---@field confirm_discard boolean Ask before destructive actions.
 ---@field signs table<string, string>
@@ -20,8 +25,13 @@ local defaults = {
   refresh_debounce_ms = 120,
   max_diff_bytes = 2 * 1024 * 1024,
   cache_entries = 24,
+  commit_limit = 150,
+  layout = "dashboard",
   file_panel_width = 0.32,
   file_panel_height = 0.35,
+  diff_layout = "auto",
+  side_by_side_min_width = 80,
+  hide_statusline = true,
   auto_refresh = true,
   confirm_discard = true,
   signs = {
@@ -38,10 +48,23 @@ local defaults = {
     next_item = "j",
     prev_item = "k",
     select = "<CR>",
-    next_file = "<Tab>",
-    prev_file = "<S-Tab>",
+    next_panel = "<Tab>",
+    prev_panel = "<S-Tab>",
+    focus_status = "1",
+    focus_branches = "2",
+    focus_commits = "3",
+    focus_stashes = "4",
+    status_view = "gs",
+    commit_view = "gl",
+    branch_view = "gb",
+    stash_view = "gz",
+    next_file = false,
+    prev_file = false,
     next_hunk = "]c",
     prev_hunk = "[c",
+    next_diff_file = "]f",
+    prev_diff_file = "[f",
+    toggle_diff = "dv",
     stage = "s",
     unstage = "u",
     discard = "X",
@@ -50,6 +73,24 @@ local defaults = {
     focus_preview = "<leader>d",
     filter = "/",
     help = "?",
+    primary_action = "x",
+    new_item = "n",
+    delete_item = "D",
+    apply_item = "a",
+    pop_item = "p",
+    commit = "c",
+    amend = "C",
+    load_more = "L",
+    fetch = "f",
+    pull = "U",
+    push = "P",
+    choose_ours = "co",
+    choose_theirs = "ct",
+    continue_operation = "gC",
+    abort_operation = "gA",
+    merge = "m",
+    rebase = "R",
+    cherry_pick = "v",
   },
 }
 
@@ -72,8 +113,13 @@ local function validate(opts)
   vim.validate("refresh_debounce_ms", opts.refresh_debounce_ms, "number")
   vim.validate("max_diff_bytes", opts.max_diff_bytes, "number")
   vim.validate("cache_entries", opts.cache_entries, "number")
+  vim.validate("commit_limit", opts.commit_limit, "number")
+  vim.validate("layout", opts.layout, "string")
   vim.validate("file_panel_width", opts.file_panel_width, "number")
   vim.validate("file_panel_height", opts.file_panel_height, "number")
+  vim.validate("diff_layout", opts.diff_layout, "string")
+  vim.validate("side_by_side_min_width", opts.side_by_side_min_width, "number")
+  vim.validate("hide_statusline", opts.hide_statusline, "boolean")
   vim.validate("auto_refresh", opts.auto_refresh, "boolean")
   vim.validate("confirm_discard", opts.confirm_discard, "boolean")
   vim.validate("signs", opts.signs, "table")
@@ -91,8 +137,29 @@ local function validate(opts)
   if opts.cache_entries < 1 or opts.cache_entries % 1 ~= 0 then
     error("ngit: cache_entries must be a positive integer", 3)
   end
+  if opts.commit_limit < 1 or opts.commit_limit % 1 ~= 0 then
+    error("ngit: commit_limit must be a positive integer", 3)
+  end
+  if
+    opts.layout ~= "dashboard"
+    and opts.layout ~= "vertical"
+    and opts.layout ~= "stacked"
+    and opts.layout ~= "auto"
+  then
+    error("ngit: layout must be 'dashboard', 'vertical', 'stacked', or 'auto'", 3)
+  end
   if opts.file_panel_width <= 0 or opts.file_panel_height <= 0 then
     error("ngit: panel dimensions must be positive", 3)
+  end
+  if
+    opts.diff_layout ~= "auto"
+    and opts.diff_layout ~= "side_by_side"
+    and opts.diff_layout ~= "unified"
+  then
+    error("ngit: diff_layout must be 'auto', 'side_by_side', or 'unified'", 3)
+  end
+  if opts.side_by_side_min_width < 40 or opts.side_by_side_min_width % 1 ~= 0 then
+    error("ngit: side_by_side_min_width must be an integer of at least 40", 3)
   end
   for name, sign in pairs(opts.signs) do
     vim.validate("signs." .. name, sign, "string")
@@ -113,6 +180,12 @@ function M.setup(opts)
   reject_unknown("mapping", opts.mappings, defaults.mappings)
   local merged = vim.tbl_deep_extend("force", vim.deepcopy(defaults), opts)
   validate(merged)
+  -- The former orientation values remain accepted so existing setup tables do
+  -- not fail during the dashboard migration. The dashboard always keeps its
+  -- patch on the right; these values are compatibility aliases.
+  if merged.layout ~= "dashboard" then
+    merged.layout = "dashboard"
+  end
   config = merged
   return config
 end

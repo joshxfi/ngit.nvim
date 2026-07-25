@@ -6,6 +6,40 @@ local M = {}
 local active
 local opening = false
 
+local function focus(session, view)
+  vim.api.nvim_set_current_tabpage(session.tab)
+  if view then
+    session:switch_view(view)
+  end
+end
+
+local function start_session(root, opts)
+  if active and not active.closed and active.tab and vim.api.nvim_tabpage_is_valid(active.tab) then
+    if active.root == root then
+      focus(active, opts.view)
+      return
+    end
+    local current_tab = vim.api.nvim_get_current_tabpage()
+    active:close()
+    if vim.api.nvim_tabpage_is_valid(current_tab) then
+      vim.api.nvim_set_current_tabpage(current_tab)
+    end
+  end
+
+  highlights.setup()
+  local Session = require("ngit.ui.session")
+  active = Session.new(root)
+  active.on_close = function(session)
+    if active == session then
+      active = nil
+    end
+  end
+  active:open()
+  if opts.view and opts.view ~= "status" then
+    active:switch_view(opts.view)
+  end
+end
+
 ---@param opts? table
 function M.setup(opts)
   return config.setup(opts)
@@ -14,8 +48,14 @@ end
 ---@param opts? { cwd?: string }
 function M.open(opts)
   opts = opts or {}
-  if active and not active.closed and active.tab and vim.api.nvim_tabpage_is_valid(active.tab) then
-    vim.api.nvim_set_current_tabpage(active.tab)
+  if
+    not opts.cwd
+    and active
+    and not active.closed
+    and active.tab
+    and vim.api.nvim_tabpage_is_valid(active.tab)
+  then
+    focus(active, opts.view)
     return
   end
   if opening then
@@ -29,15 +69,7 @@ function M.open(opts)
       vim.notify(err or "Not inside a Git repository", vim.log.levels.ERROR, { title = "ngit" })
       return
     end
-    highlights.setup()
-    local Session = require("ngit.ui.session")
-    active = Session.new(root)
-    active.on_close = function(session)
-      if active == session then
-        active = nil
-      end
-    end
-    active:open()
+    start_session(root, opts)
   end)
 end
 
@@ -59,4 +91,3 @@ function M._active_session()
 end
 
 return M
-

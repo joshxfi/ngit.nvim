@@ -40,15 +40,24 @@ local function write_file(path, content)
   file:close()
 end
 
+local function read_file(path)
+  local file = assert(io.open(path, "rb"))
+  local content = file:read("*a")
+  file:close()
+  return content
+end
+
 local function git(root, args, opts)
   opts = opts or {}
   local command = { "git", "-c", "user.name=ngit tests", "-c", "user.email=ngit@example.test" }
   vim.list_extend(command, args)
-  local result = vim.system(command, {
-    cwd = root,
-    text = true,
-    stdin = opts.stdin,
-  }):wait(10000)
+  local result = vim
+    .system(command, {
+      cwd = root,
+      text = true,
+      stdin = opts.stdin,
+    })
+    :wait(10000)
   if not opts.accept or not opts.accept[result.code] then
     equal(0, result.code, table.concat(command, " ") .. "\n" .. (result.stderr or ""))
   end
@@ -59,6 +68,8 @@ local function repository()
   local root = vim.fn.tempname()
   assert(vim.uv.fs_mkdir(root, 448))
   git(root, { "init", "-q", "-b", "main" })
+  git(root, { "config", "user.name", "ngit tests" })
+  git(root, { "config", "user.email", "ngit@example.test" })
   return root
 end
 
@@ -69,11 +80,24 @@ local function wait_for(register)
     values = { ... }
     complete = true
   end)
-  truthy(vim.wait(10000, function()
-    return complete
-  end, 10), "asynchronous operation timed out")
+  truthy(
+    vim.wait(10000, function()
+      return complete
+    end, 10),
+    "asynchronous operation timed out"
+  )
   return unpack(values)
 end
+
+test("plugin registers every public entrypoint command", function()
+  local commands = vim.api.nvim_get_commands({})
+  truthy(commands.NGit)
+  truthy(commands.NGitLog)
+  truthy(commands.NGitBranches)
+  truthy(commands.NGitStashes)
+  truthy(commands.NGitRefresh)
+  truthy(commands.NGitClose)
+end)
 
 test("porcelain v2 parser handles headers and every entry class", function()
   local parse = require("ngit.git.status").parse
@@ -135,6 +159,111 @@ test("diff parser marks an externally truncated stream", function()
   truthy(parsed.text:find("preview truncated", 1, true))
 end)
 
+test("semantic diff model aligns old and new rows without raw plumbing", function()
+  local patch = table.concat({
+    "commit abcdef",
+    "Author: Test User",
+    "",
+    "diff --git a/example.lua b/example.lua",
+    "index 1111111..2222222 100644",
+    "--- a/example.lua",
+    "+++ b/example.lua",
+    "@@ -1,3 +1,4 @@ local value",
+    " local before = true",
+    "-local value = 'old'",
+    "+local value = 'new'",
+    "+local added = true",
+    " return value",
+    "",
+  }, "\n")
+  local parsed = require("ngit.git.diff").parse(patch, 10000)
+  equal(1, #parsed.files)
+  equal("example.lua", parsed.files[1].display_path)
+  equal(1, #parsed.files[1].hunks)
+  equal("change", parsed.files[1].hunks[1].rows[2].left.kind)
+  equal("change", parsed.files[1].hunks[1].rows[2].right.kind)
+  equal(nil, parsed.files[1].hunks[1].rows[3].left)
+  equal("add", parsed.files[1].hunks[1].rows[3].right.kind)
+
+  local split = require("ngit.ui.diff_view").split(parsed, { title = "example.lua" })
+  equal(#split.left.lines, #split.right.lines)
+  truthy(table.concat(split.left.lines, "\n"):find("local value = 'old'", 1, true))
+  truthy(table.concat(split.right.lines, "\n"):find("local value = 'new'", 1, true))
+  truthy(not table.concat(split.left.lines, "\n"):find("diff --git", 1, true))
+  truthy(split.left.row_hunks[3])
+  local groups = {}
+  for _, item in ipairs(split.left.highlights) do
+    groups[item.group] = true
+  end
+  truthy(groups.NgitDiffDelete)
+  truthy(groups.NgitDiffDeleteText)
+  local right_groups = {}
+  for _, item in ipairs(split.right.highlights) do
+    right_groups[item.group] = true
+  end
+  truthy(right_groups.NgitDiffAdd)
+  truthy(right_groups.NgitDiffAddText)
+  local unified = require("ngit.ui.diff_view").unified(parsed, { title = "example.lua" }, split)
+  local unified_groups = {}
+  for _, item in ipairs(unified.unified.highlights) do
+    unified_groups[item.group] = true
+  end
+  truthy(unified_groups.NgitDiffDelete)
+  truthy(unified_groups.NgitDiffAdd)
+  truthy(unified_groups.NgitDiffDeleteText)
+  truthy(unified_groups.NgitDiffAddText)
+end)
+
+test("semantic diff model decodes quoted rename-only paths", function()
+  local patch = table.concat({
+    [[diff --git "a/old\tname.lua" "b/new\tname.lua"]],
+    "similarity index 100%",
+    [[rename from "old\tname.lua"]],
+    [[rename to "new\tname.lua"]],
+    "",
+  }, "\n")
+  local parsed = require("ngit.git.diff").parse(patch, 10000)
+  equal(1, #parsed.files)
+  equal("old\tname.lua", parsed.files[1].old_path)
+  equal("new\tname.lua", parsed.files[1].new_path)
+  equal("new\tname.lua", parsed.files[1].display_path)
+end)
+
+test("semantic diff model decodes quoted binary paths", function()
+  local patch = table.concat({
+    [[diff --git "a/assets/old image.png" "b/assets/new image.png"]],
+    [[Binary files "a/assets/old image.png" and "b/assets/new image.png" differ]],
+    "",
+  }, "\n")
+  local parsed = require("ngit.git.diff").parse(patch, 10000)
+  equal(1, #parsed.files)
+  equal(true, parsed.files[1].binary)
+  equal("assets/old image.png", parsed.files[1].old_path)
+  equal("assets/new image.png", parsed.files[1].new_path)
+end)
+
+test("intraline highlighting uses valid UTF-8 byte boundaries", function()
+  local patch = table.concat({
+    "diff --git a/example.lua b/example.lua",
+    "--- a/example.lua",
+    "+++ b/example.lua",
+    "@@ -1 +1 @@",
+    "-local café = 1",
+    "+local café = 2",
+    "",
+  }, "\n")
+  local parsed = require("ngit.git.diff").parse(patch, 10000)
+  local model = require("ngit.ui.diff_view").split(parsed, { title = "UTF-8" })
+  local spans = {}
+  for _, item in ipairs(model.left.highlights) do
+    if item.group == "NgitDiffDeleteText" then
+      spans[#spans + 1] = item
+    end
+  end
+  equal(1, #spans)
+  equal("1", model.left.lines[spans[1].row + 1]:sub(spans[1].col + 1, spans[1].end_col))
+end)
+
 test("configuration rejects misspelled options", function()
   local ok, err = pcall(require("ngit").setup, { debounce_milliseconds = 10 })
   equal(false, ok)
@@ -149,6 +278,66 @@ test("configuration rejects unsafe resource limits", function()
   require("ngit").setup()
 end)
 
+test("diff highlights provide visible theme-derived backgrounds", function()
+  require("ngit.ui.highlights").setup()
+  local add = vim.api.nvim_get_hl(0, { name = "NgitDiffAdd", link = false })
+  local delete = vim.api.nvim_get_hl(0, { name = "NgitDiffDelete", link = false })
+  local add_text = vim.api.nvim_get_hl(0, { name = "NgitDiffAddText", link = false })
+  local delete_text = vim.api.nvim_get_hl(0, { name = "NgitDiffDeleteText", link = false })
+  truthy(add.bg)
+  truthy(delete.bg)
+  truthy(add_text.bg)
+  truthy(delete_text.bg)
+  truthy(add.bg ~= delete.bg)
+  truthy(add_text.bg ~= add.bg)
+  truthy(delete_text.bg ~= delete.bg)
+end)
+
+test("dashboard is the default layout with configurable panel navigation", function()
+  local defaults = require("ngit.config").defaults()
+  equal("dashboard", defaults.layout)
+  equal("<Tab>", defaults.mappings.next_panel)
+  equal("<S-Tab>", defaults.mappings.prev_panel)
+  equal("1", defaults.mappings.focus_status)
+  equal("4", defaults.mappings.focus_stashes)
+  equal("auto", defaults.diff_layout)
+  equal(true, defaults.hide_statusline)
+  equal("dv", defaults.mappings.toggle_diff)
+  equal("dashboard", require("ngit").setup({ layout = "vertical" }).layout)
+  require("ngit").setup()
+end)
+
+test("contextual actions use configured keys and exclude unrelated panels", function()
+  local mappings = require("ngit.config").defaults().mappings
+  mappings.stage = "S"
+  local available = require("ngit.ui.actions").for_context({
+    panel = "status",
+    entry = {
+      section = "unstaged",
+      file = { kind = "modified" },
+    },
+  }, mappings)
+  local by_id = {}
+  for _, item in ipairs(available) do
+    by_id[item.id] = item
+  end
+  equal("S", by_id.stage.key)
+  equal(nil, by_id.unstage)
+  equal(nil, by_id.primary)
+
+  mappings.stage = false
+  available = require("ngit.ui.actions").for_context({
+    panel = "status",
+    entry = {
+      section = "unstaged",
+      file = { kind = "modified" },
+    },
+  }, mappings)
+  for _, item in ipairs(available) do
+    truthy(item.id ~= "stage", "disabled actions must not appear")
+  end
+end)
+
 test("LRU evicts the least recently used value", function()
   local cache = require("ngit.util.lru").new(2)
   cache:set("a", 1)
@@ -158,6 +347,343 @@ test("LRU evicts the least recently used value", function()
   equal(nil, cache:get("b"))
   equal(1, cache:get("a"))
   equal(3, cache:get("c"))
+end)
+
+test("commit, branch, and stash backends parse a real repository", function()
+  local root = repository()
+  write_file(vim.fs.joinpath(root, "history.txt"), "first\n")
+  git(root, { "add", "history.txt" })
+  git(root, { "commit", "-q", "-m", "first commit" })
+  write_file(vim.fs.joinpath(root, "history.txt"), "second\n")
+  git(root, { "commit", "-q", "-am", "second commit" })
+
+  local commits, has_more, log_err = wait_for(function(done)
+    require("ngit.git.log").list(root, { limit = 1 }, done)
+  end)
+  equal(nil, log_err)
+  equal(1, #commits)
+  equal(true, has_more)
+  equal("second commit", commits[1].subject)
+  equal(40, #commits[1].oid)
+
+  local shown, show_err = wait_for(function(done)
+    require("ngit.git.log").show(root, commits[1].oid, 10000, done)
+  end)
+  equal(nil, show_err)
+  truthy(shown.text:find("second commit", 1, true))
+  truthy(shown.text:find("+second", 1, true))
+
+  local created, create_err = wait_for(function(done)
+    require("ngit.git.branch").create(root, "feature/test", done)
+  end)
+  equal(true, created)
+  equal(nil, create_err)
+  local branches, branch_err = wait_for(function(done)
+    require("ngit.git.branch").list(root, done)
+  end)
+  equal(nil, branch_err)
+  local found_branch
+  for _, branch in ipairs(branches) do
+    if branch.name == "feature/test" then
+      found_branch = branch
+    end
+  end
+  truthy(found_branch)
+  equal(true, found_branch.current)
+
+  local main_branch
+  for _, branch in ipairs(branches) do
+    if branch.name == "main" then
+      main_branch = branch
+    end
+  end
+  local switched, switch_err = wait_for(function(done)
+    require("ngit.git.branch").switch(root, main_branch, done)
+  end)
+  equal(true, switched)
+  equal(nil, switch_err)
+  local deleted, delete_err = wait_for(function(done)
+    require("ngit.git.branch").delete(root, "feature/test", false, done)
+  end)
+  equal(true, deleted)
+  equal(nil, delete_err)
+
+  write_file(vim.fs.joinpath(root, "history.txt"), "stashed\n")
+  local pushed, push_err = wait_for(function(done)
+    require("ngit.git.stash").push(root, "test stash", done)
+  end)
+  equal(true, pushed)
+  equal(nil, push_err)
+  local stashes, stash_err = wait_for(function(done)
+    require("ngit.git.stash").list(root, done)
+  end)
+  equal(nil, stash_err)
+  equal(1, #stashes)
+  truthy(stashes[1].subject:find("test stash", 1, true))
+  local stash_diff = wait_for(function(done)
+    require("ngit.git.stash").show(root, stashes[1], 10000, done)
+  end)
+  truthy(stash_diff.text:find("+stashed", 1, true))
+  local applied, apply_err = wait_for(function(done)
+    require("ngit.git.stash").apply(root, stashes[1], done)
+  end)
+  equal(true, applied)
+  equal(nil, apply_err)
+  truthy(git(root, { "diff" }).stdout:find("+stashed", 1, true))
+  git(root, { "restore", "history.txt" })
+  local dropped, drop_err = wait_for(function(done)
+    require("ngit.git.stash").drop(root, stashes[1], done)
+  end)
+  equal(true, dropped)
+  equal(nil, drop_err)
+
+  write_file(vim.fs.joinpath(root, "history.txt"), "pop this\n")
+  local repushed = wait_for(function(done)
+    require("ngit.git.stash").push(root, "pop stash", done)
+  end)
+  equal(true, repushed)
+  local pop_stashes = wait_for(function(done)
+    require("ngit.git.stash").list(root, done)
+  end)
+  local popped, pop_err = wait_for(function(done)
+    require("ngit.git.stash").pop(root, pop_stashes[1], done)
+  end)
+  equal(true, popped)
+  equal(nil, pop_err)
+  equal("pop this\n", read_file(vim.fs.joinpath(root, "history.txt")))
+end)
+
+test("commit history is empty rather than erroneous on an unborn branch", function()
+  local root = repository()
+  local commits, has_more, err = wait_for(function(done)
+    require("ngit.git.log").list(root, { limit = 10 }, done)
+  end)
+  equal(nil, err)
+  equal({}, commits)
+  equal(false, has_more)
+end)
+
+test("commit backend creates and amends commits through stdin safely", function()
+  local root = repository()
+  write_file(vim.fs.joinpath(root, "commit.txt"), "one\n")
+  git(root, { "add", "commit.txt" })
+
+  local committed, commit_err = wait_for(function(done)
+    require("ngit.git.mutate").commit(root, "created by ngit", false, done)
+  end)
+  equal(true, committed)
+  equal(nil, commit_err)
+  equal("created by ngit\n", git(root, { "log", "-1", "--format=%s" }).stdout)
+
+  write_file(vim.fs.joinpath(root, "commit.txt"), "two\n")
+  git(root, { "add", "commit.txt" })
+  local amended, amend_err = wait_for(function(done)
+    require("ngit.git.mutate").commit(root, "", true, done)
+  end)
+  equal(true, amended)
+  equal(nil, amend_err)
+  equal("created by ngit\n", git(root, { "log", "-1", "--format=%s" }).stdout)
+  equal("two\n", git(root, { "show", "HEAD:commit.txt" }).stdout)
+  local message, message_err = wait_for(function(done)
+    require("ngit.git.log").head_message(root, done)
+  end)
+  equal(nil, message_err)
+  equal("created by ngit", message)
+end)
+
+test("commit editor submits a multiline gitcommit buffer", function()
+  local root = repository()
+  write_file(vim.fs.joinpath(root, "editor.txt"), "content\n")
+  git(root, { "add", "editor.txt" })
+
+  local completed = false
+  local editor = require("ngit.ui.commit_editor").new(root, {
+    amend = false,
+    on_complete = function()
+      completed = true
+    end,
+  })
+  vim.api.nvim_buf_set_lines(editor.buffer, 0, -1, false, {
+    "subject from editor",
+    "",
+    "body from editor",
+  })
+  editor:submit()
+  truthy(vim.wait(10000, function()
+    return completed
+  end, 10))
+  equal(
+    "subject from editor\n\nbody from editor\n\n",
+    git(root, { "log", "-1", "--format=%B" }).stdout
+  )
+end)
+
+test("streaming console appends output and cleans up its window", function()
+  local console = require("ngit.ui.console").new("test operation")
+  console:append("first\nsecond\n")
+  console:finish(true, 0)
+  local contents = table.concat(vim.api.nvim_buf_get_lines(console.buffer, 0, -1, false), "\n")
+  truthy(contents:find("first", 1, true))
+  truthy(contents:find("Completed successfully.", 1, true))
+  local window = console.window
+  console:close()
+  equal(false, vim.api.nvim_win_is_valid(window))
+end)
+
+test("remote backend streams local fetch, pull, and push operations", function()
+  local root = repository()
+  write_file(vim.fs.joinpath(root, "remote.txt"), "one\n")
+  git(root, { "add", "remote.txt" })
+  git(root, { "commit", "-q", "-m", "initial" })
+
+  local bare = vim.fn.tempname()
+  assert(vim.uv.fs_mkdir(bare, 448))
+  git(bare, { "init", "-q", "--bare" })
+  git(root, { "remote", "add", "origin", bare })
+  git(root, { "push", "-q", "-u", "origin", "main" })
+
+  write_file(vim.fs.joinpath(root, "remote.txt"), "pushed\n")
+  git(root, { "commit", "-q", "-am", "push from ngit" })
+  local chunks = {}
+  local pushed, push_result = wait_for(function(done)
+    require("ngit.git.remote").run(root, "push", function(stream, data)
+      chunks[#chunks + 1] = stream .. ":" .. data
+    end, done)
+  end)
+  equal(true, pushed)
+  equal(0, push_result.code)
+  truthy(#chunks > 0)
+
+  local clone_parent = vim.fn.tempname()
+  assert(vim.uv.fs_mkdir(clone_parent, 448))
+  local clone = vim.fs.joinpath(clone_parent, "clone")
+  git(clone_parent, { "clone", "-q", bare, clone })
+  write_file(vim.fs.joinpath(clone, "remote.txt"), "pulled\n")
+  git(clone, { "commit", "-q", "-am", "upstream change" })
+  git(clone, { "push", "-q" })
+
+  local fetched = wait_for(function(done)
+    require("ngit.git.remote").run(root, "fetch", function() end, done)
+  end)
+  equal(true, fetched)
+  local pulled, pull_result = wait_for(function(done)
+    require("ngit.git.remote").run(root, "pull", function() end, done)
+  end)
+  equal(true, pulled)
+  equal(0, pull_result.code)
+  equal("pulled\n", git(root, { "show", "HEAD:remote.txt" }).stdout)
+end)
+
+test("conflicts can choose a side and continue an active merge", function()
+  local root = repository()
+  write_file(vim.fs.joinpath(root, "conflict.txt"), "base\n")
+  git(root, { "add", "conflict.txt" })
+  git(root, { "commit", "-q", "-m", "base" })
+  git(root, { "switch", "-q", "-c", "feature" })
+  write_file(vim.fs.joinpath(root, "conflict.txt"), "feature\n")
+  git(root, { "commit", "-q", "-am", "feature" })
+  git(root, { "switch", "-q", "main" })
+  write_file(vim.fs.joinpath(root, "conflict.txt"), "main\n")
+  git(root, { "commit", "-q", "-am", "main" })
+  local merge_ok = wait_for(function(done)
+    require("ngit.git.sequencer").start(root, "merge", "feature", done)
+  end)
+  equal(false, merge_ok)
+
+  local operation, detect_err = wait_for(function(done)
+    require("ngit.git.sequencer").detect(root, done)
+  end)
+  equal("merge", operation)
+  equal(nil, detect_err)
+  local status = wait_for(function(done)
+    require("ngit.git.status").load(root, done)
+  end)
+  equal("conflict", status.files[1].kind)
+
+  local resolved, resolve_err = wait_for(function(done)
+    require("ngit.git.conflict").choose(root, "conflict.txt", "ours", done)
+  end)
+  equal(true, resolved)
+  equal(nil, resolve_err)
+  equal("main\n", read_file(vim.fs.joinpath(root, "conflict.txt")))
+
+  local continued, continue_err = wait_for(function(done)
+    require("ngit.git.sequencer").run(root, "merge", "continue", done)
+  end)
+  equal(true, continued)
+  equal(nil, continue_err)
+  local after = wait_for(function(done)
+    require("ngit.git.sequencer").detect(root, done)
+  end)
+  equal(nil, after)
+  truthy(git(root, { "log", "-1", "--format=%P" }).stdout:find(" ", 1, true))
+end)
+
+test("a selected commit can start a successful cherry-pick", function()
+  local root = repository()
+  write_file(vim.fs.joinpath(root, "base.txt"), "base\n")
+  git(root, { "add", "base.txt" })
+  git(root, { "commit", "-q", "-m", "base" })
+  git(root, { "switch", "-q", "-c", "topic" })
+  write_file(vim.fs.joinpath(root, "picked.txt"), "picked\n")
+  git(root, { "add", "picked.txt" })
+  git(root, { "commit", "-q", "-m", "pick me" })
+  local oid = vim.trim(git(root, { "rev-parse", "HEAD" }).stdout)
+  git(root, { "switch", "-q", "main" })
+
+  local picked, pick_err = wait_for(function(done)
+    require("ngit.git.sequencer").start(root, "cherry-pick", oid, done)
+  end)
+  equal(true, picked)
+  equal(nil, pick_err)
+  equal("picked\n", read_file(vim.fs.joinpath(root, "picked.txt")))
+  equal("pick me\n", git(root, { "log", "-1", "--format=%s" }).stdout)
+end)
+
+test("rebase can start successfully and an active merge can abort", function()
+  local root = repository()
+  write_file(vim.fs.joinpath(root, "base.txt"), "base\n")
+  git(root, { "add", "base.txt" })
+  git(root, { "commit", "-q", "-m", "base" })
+  git(root, { "switch", "-q", "-c", "topic" })
+  write_file(vim.fs.joinpath(root, "topic.txt"), "topic\n")
+  git(root, { "add", "topic.txt" })
+  git(root, { "commit", "-q", "-m", "topic" })
+  git(root, { "switch", "-q", "main" })
+  write_file(vim.fs.joinpath(root, "main.txt"), "main\n")
+  git(root, { "add", "main.txt" })
+  git(root, { "commit", "-q", "-m", "main" })
+  local main_oid = vim.trim(git(root, { "rev-parse", "HEAD" }).stdout)
+  git(root, { "switch", "-q", "topic" })
+
+  local rebased, rebase_err = wait_for(function(done)
+    require("ngit.git.sequencer").start(root, "rebase", main_oid, done)
+  end)
+  equal(true, rebased)
+  equal(nil, rebase_err)
+  equal(main_oid .. "\n", git(root, { "merge-base", "HEAD", "main" }).stdout)
+
+  git(root, { "switch", "-q", "main" })
+  write_file(vim.fs.joinpath(root, "base.txt"), "main version\n")
+  git(root, { "commit", "-q", "-am", "main conflict" })
+  git(root, { "switch", "-q", "topic" })
+  write_file(vim.fs.joinpath(root, "base.txt"), "topic version\n")
+  git(root, { "commit", "-q", "-am", "topic conflict" })
+  local before_merge = vim.trim(git(root, { "rev-parse", "HEAD" }).stdout)
+  local merge_started = wait_for(function(done)
+    require("ngit.git.sequencer").start(root, "merge", "main", done)
+  end)
+  equal(false, merge_started)
+  local active = wait_for(function(done)
+    require("ngit.git.sequencer").detect(root, done)
+  end)
+  equal("merge", active)
+  local aborted, abort_err = wait_for(function(done)
+    require("ngit.git.sequencer").run(root, "merge", "abort", done)
+  end)
+  equal(true, aborted)
+  equal(nil, abort_err)
+  equal(before_merge .. "\n", git(root, { "rev-parse", "HEAD" }).stdout)
 end)
 
 test("real repository status, diff, file stage and unstage round trip", function()
@@ -237,10 +763,9 @@ test("rename and unusual filenames survive status parsing and literal staging", 
   write_file(vim.fs.joinpath(root, "old name.txt"), "old\n")
   git(root, { "add", "old name.txt" })
   git(root, { "commit", "-q", "-m", "initial" })
-  assert(vim.uv.fs_rename(
-    vim.fs.joinpath(root, "old name.txt"),
-    vim.fs.joinpath(root, "new name.txt")
-  ))
+  assert(
+    vim.uv.fs_rename(vim.fs.joinpath(root, "old name.txt"), vim.fs.joinpath(root, "new name.txt"))
+  )
   git(root, { "add", "-A" })
 
   local renamed = wait_for(function(done)
@@ -286,23 +811,391 @@ test("a newly added file can be fully unstaged by reversing its patch", function
   equal("?? new.txt\n", git(root, { "status", "--porcelain" }).stdout)
 end)
 
+test("whole-file unstage does not construct an unbounded patch", function()
+  local root = repository()
+  write_file(vim.fs.joinpath(root, "bounded.txt"), "bounded\n")
+  git(root, { "add", "bounded.txt" })
+
+  local ok, err = wait_for(function(done)
+    require("ngit.git.mutate").unstage_file(root, "bounded.txt", done)
+  end)
+  equal(true, ok)
+  equal(nil, err)
+  equal("?? bounded.txt\n", git(root, { "status", "--porcelain" }).stdout)
+end)
+
+test("a hunk can be staged from the structured new-side preview", function()
+  local root = repository()
+  write_file(vim.fs.joinpath(root, "preview.lua"), "local one = 1\nlocal two = 2\n")
+  git(root, { "add", "preview.lua" })
+  git(root, { "commit", "-q", "-m", "initial" })
+  write_file(vim.fs.joinpath(root, "preview.lua"), "local one = 1\nlocal two = 22\n")
+
+  require("ngit").setup({ diff_layout = "side_by_side" })
+  require("ngit").open({ cwd = root })
+  truthy(vim.wait(10000, function()
+    local session = require("ngit")._active_session()
+    return session and session.current_diff_models and session.current_diff
+  end, 10))
+  local session = require("ngit")._active_session()
+  session.dashboard:focus_preview("right")
+  local row
+  for visible_row in pairs(session.current_diff_models.split.right.row_hunks) do
+    row = row and math.min(row, visible_row) or visible_row
+  end
+  truthy(row)
+  vim.api.nvim_win_set_cursor(session.dashboard.preview.right.window, { row, 0 })
+  session:stage()
+  truthy(
+    vim.wait(10000, function()
+      return git(root, { "diff", "--cached", "--", "preview.lua" }).stdout:find(
+        "local two = 22",
+        1,
+        true
+      ) ~= nil
+    end, 10),
+    "preview hunk was not staged"
+  )
+  require("ngit").close()
+  require("ngit").setup()
+end)
+
 test("session renders a real repository and closes cleanly", function()
   local root = repository()
   write_file(vim.fs.joinpath(root, "visible.txt"), "hello\n")
 
   require("ngit").open({ cwd = root })
-  truthy(vim.wait(10000, function()
-    local session = require("ngit")._active_session()
-    return session and session.status and #session.entries == 1 and session.current_diff ~= nil
-  end, 10), "session did not finish rendering")
+  truthy(
+    vim.wait(10000, function()
+      local session = require("ngit")._active_session()
+      return session and session.status and #session.entries == 1 and session.current_diff ~= nil
+    end, 10),
+    "session did not finish rendering"
+  )
 
   local session = require("ngit")._active_session()
   local file_lines = vim.api.nvim_buf_get_lines(session.files_buf, 0, -1, false)
   truthy(table.concat(file_lines, "\n"):find("visible.txt", 1, true))
   local preview = vim.api.nvim_buf_get_lines(session.preview_buf, 0, -1, false)
-  truthy(table.concat(preview, "\n"):find("+hello", 1, true))
+  truthy(table.concat(preview, "\n"):find("hello", 1, true))
+  truthy(not table.concat(preview, "\n"):find("diff --git", 1, true))
+  session.cache:clear()
+  session:load_preview()
+  equal(nil, session.current_diff)
+  equal(nil, session.current_diff_models)
+  equal(nil, session.dashboard.preview.models)
+  local toggled = pcall(session.toggle_diff_layout, session)
+  equal(true, toggled)
   require("ngit").close()
   equal(nil, require("ngit")._active_session())
+end)
+
+test("opening an explicit directory switches the active repository", function()
+  local first = repository()
+  local second = repository()
+  local first_root = vim.fs.normalize(vim.uv.fs_realpath(first) or first)
+  local second_root = vim.fs.normalize(vim.uv.fs_realpath(second) or second)
+  write_file(vim.fs.joinpath(first, "first.txt"), "first\n")
+  write_file(vim.fs.joinpath(second, "second.txt"), "second\n")
+
+  require("ngit").open({ cwd = first })
+  truthy(vim.wait(10000, function()
+    local session = require("ngit")._active_session()
+    return session and session.root == first_root and session.status ~= nil
+  end, 10))
+  require("ngit").open({ cwd = second })
+  truthy(
+    vim.wait(10000, function()
+      local session = require("ngit")._active_session()
+      return session and session.root == second_root and session.status ~= nil
+    end, 10),
+    "explicit cwd did not replace the active repository"
+  )
+  require("ngit").close()
+end)
+
+test("stale status callbacks do not release a newer job", function()
+  local root = repository()
+  local backend = require("ngit.git.status")
+  local original_load = backend.load
+  local pending = {}
+  backend.load = function(_, callback)
+    local job = {
+      killed = false,
+      kill = function(self)
+        self.killed = true
+      end,
+    }
+    pending[#pending + 1] = { callback = callback, job = job }
+    return job
+  end
+
+  require("ngit").open({ cwd = root })
+  truthy(vim.wait(10000, function()
+    return #pending == 1
+  end, 10))
+  local session = require("ngit")._active_session()
+  equal(1, #pending)
+  session:refresh()
+  equal(2, #pending)
+  equal(true, pending[1].job.killed)
+  pending[1].callback({ files = {}, branch = "old", ahead = 0, behind = 0 })
+  equal(pending[2].job, session.status_job)
+  pending[2].callback({ files = {}, branch = "main", ahead = 0, behind = 0 })
+  equal(nil, session.status_job)
+  backend.load = original_load
+  require("ngit").close()
+end)
+
+test("status-only refresh leaves history collections alone", function()
+  local root = repository()
+  write_file(vim.fs.joinpath(root, "refresh.txt"), "one\n")
+  git(root, { "add", "refresh.txt" })
+  git(root, { "commit", "-q", "-m", "refresh fixture" })
+  write_file(vim.fs.joinpath(root, "refresh.txt"), "two\n")
+
+  require("ngit").open({ cwd = root })
+  truthy(vim.wait(10000, function()
+    local session = require("ngit")._active_session()
+    return session
+      and session.status
+      and not session.panels.commits.loading
+      and not session.panels.branches.loading
+      and not session.panels.stashes.loading
+  end, 10))
+  local session = require("ngit")._active_session()
+  local log_backend = require("ngit.git.log")
+  local branch_backend = require("ngit.git.branch")
+  local stash_backend = require("ngit.git.stash")
+  local original_log = log_backend.list
+  local original_branch = branch_backend.list
+  local original_stash = stash_backend.list
+  local collection_calls = 0
+  log_backend.list = function(...)
+    collection_calls = collection_calls + 1
+    return original_log(...)
+  end
+  branch_backend.list = function(...)
+    collection_calls = collection_calls + 1
+    return original_branch(...)
+  end
+  stash_backend.list = function(...)
+    collection_calls = collection_calls + 1
+    return original_stash(...)
+  end
+
+  session:refresh_status()
+  truthy(vim.wait(10000, function()
+    return not session.panels.status.loading
+  end, 10))
+  equal(0, collection_calls)
+  log_backend.list = original_log
+  branch_backend.list = original_branch
+  stash_backend.list = original_stash
+  require("ngit").close()
+end)
+
+test("help reflects configured mappings and omits disabled actions", function()
+  require("ngit").setup({ mappings = { stage = "S", refresh = false } })
+  local session = require("ngit.ui.session").new(repository())
+  local help = table.concat(session:help_lines(), "\n")
+  truthy(help:find("S", 1, true))
+  truthy(help:find("Stage", 1, true))
+  truthy(not help:find("Refresh", 1, true))
+  require("ngit").setup()
+end)
+
+test("dashboard rejects unusable dimensions before creating a tab", function()
+  local previous_columns = vim.o.columns
+  local previous_lines = vim.o.lines
+  local tab_count = #vim.api.nvim_list_tabpages()
+  vim.o.columns = 39
+  vim.o.lines = 16
+  local ok, err = pcall(require("ngit.ui.dashboard").open, 99999, require("ngit.config").defaults())
+  equal(false, ok)
+  truthy(tostring(err):find("at least 40 columns by 16 lines", 1, true))
+  equal(tab_count, #vim.api.nvim_list_tabpages())
+  vim.o.columns = previous_columns
+  vim.o.lines = previous_lines
+end)
+
+test("dashboard uses unified preview at a narrow usable size", function()
+  local previous_columns = vim.o.columns
+  local previous_lines = vim.o.lines
+  local previous_laststatus = vim.o.laststatus
+  local origin = vim.api.nvim_get_current_tabpage()
+  vim.o.columns = 50
+  vim.o.lines = 16
+  vim.o.laststatus = 3
+  local dashboard = require("ngit.ui.dashboard").open(99998, require("ngit.config").defaults())
+  equal("unified", dashboard.preview.layout)
+  truthy(vim.api.nvim_win_is_valid(dashboard.preview.unified.window))
+  local tab = dashboard.tab
+  dashboard:dispose()
+  if vim.api.nvim_tabpage_is_valid(tab) then
+    vim.api.nvim_set_current_tabpage(tab)
+    vim.cmd("tabclose")
+  end
+  if vim.api.nvim_tabpage_is_valid(origin) then
+    vim.api.nvim_set_current_tabpage(origin)
+  end
+  vim.o.columns = previous_columns
+  vim.o.lines = previous_lines
+  vim.o.laststatus = previous_laststatus
+end)
+
+test("session dashboard keeps all Git contexts visible with the diff on the right", function()
+  local root = repository()
+  write_file(vim.fs.joinpath(root, "views.txt"), "committed\n")
+  git(root, { "add", "views.txt" })
+  git(root, { "commit", "-q", "-m", "visible commit" })
+  git(root, { "branch", "feature/view" })
+  write_file(vim.fs.joinpath(root, "views.txt"), "stashed\n")
+  git(root, { "stash", "push", "-q", "-m", "visible stash" })
+  write_file(vim.fs.joinpath(root, "dashboard.txt"), "visible change\n")
+
+  local previous_statusline = vim.go.statusline
+  local previous_laststatus = vim.o.laststatus
+  local previous_lualine = package.loaded.lualine
+  local lualine_hide_calls = {}
+  package.loaded.lualine = {
+    hide = function(opts)
+      lualine_hide_calls[#lualine_hide_calls + 1] = opts
+    end,
+  }
+  vim.go.statusline = "GLOBAL STATUSLINE SENTINEL"
+  vim.o.laststatus = 2
+  require("ngit").setup({ diff_layout = "side_by_side" })
+  require("ngit").open({ cwd = root })
+  truthy(
+    vim.wait(10000, function()
+      local session = require("ngit")._active_session()
+      return session
+        and session.status
+        and #session.panels.status.entries == 1
+        and #session.panels.commits.entries > 0
+        and #session.panels.branches.entries >= 2
+        and #session.panels.stashes.entries == 1
+        and session.current_diff
+    end, 10),
+    "dashboard did not finish loading every panel"
+  )
+  local session = require("ngit")._active_session()
+  equal("dashboard", session.layout)
+  equal("side_by_side", session.dashboard.preview.layout)
+  truthy(vim.api.nvim_win_is_valid(session.dashboard.preview.left.window))
+  truthy(vim.api.nvim_win_is_valid(session.dashboard.preview.right.window))
+  truthy(
+    vim.api.nvim_win_get_position(session.dashboard.preview.right.window)[2]
+      > vim.api.nvim_win_get_position(session.dashboard.preview.left.window)[2]
+  )
+  local header_position = vim.api.nvim_win_get_position(session.dashboard.preview.header.window)
+  local left_position = vim.api.nvim_win_get_position(session.dashboard.preview.left.window)
+  local right_position = vim.api.nvim_win_get_position(session.dashboard.preview.right.window)
+  equal(left_position[2], header_position[2])
+  truthy(
+    vim.api.nvim_win_get_width(session.dashboard.preview.header.window)
+      >= right_position[2]
+        + vim.api.nvim_win_get_width(session.dashboard.preview.right.window)
+        - left_position[2]
+  )
+  local current_diff = session.current_diff
+  session:toggle_diff_layout()
+  equal("unified", session.dashboard.preview.layout)
+  equal(current_diff, session.current_diff)
+  truthy(vim.api.nvim_win_is_valid(session.dashboard.preview.unified.window))
+  session:toggle_diff_layout()
+  equal("side_by_side", session.dashboard.preview.layout)
+  for _, item in ipairs(session.dashboard:preview_windows()) do
+    truthy(vim.wo[item.window].statusline:find("NgitStatusline", 1, true))
+  end
+  equal("GLOBAL STATUSLINE SENTINEL", vim.go.statusline)
+  equal(3, vim.o.laststatus)
+  equal(false, lualine_hide_calls[1].unhide == true)
+  vim.o.laststatus = 2
+  vim.api.nvim_set_current_win(session.dashboard.panels.branches.window)
+  equal(3, vim.o.laststatus)
+  vim.api.nvim_set_current_tabpage(session.origin_tab)
+  equal(2, vim.o.laststatus)
+  vim.api.nvim_set_current_tabpage(session.tab)
+  equal(3, vim.o.laststatus)
+  local preview_position = vim.api.nvim_win_get_position(session.preview_win)
+  local action_position = vim.api.nvim_win_get_position(session.dashboard.actions.window)
+  for _, id in ipairs({ "status", "branches", "commits", "stashes" }) do
+    local panel_position = vim.api.nvim_win_get_position(session.dashboard.panels[id].window)
+    truthy(preview_position[2] > panel_position[2], "preview must remain right of " .. id)
+    equal(0, panel_position[2])
+  end
+  truthy(action_position[1] > preview_position[1], "action bar must be below the preview")
+  equal(1, vim.api.nvim_win_get_height(session.dashboard.actions.window))
+  truthy(
+    vim.api.nvim_win_get_width(session.dashboard.actions.window)
+      > vim.api.nvim_win_get_width(session.dashboard.panels.status.window),
+    "action bar must span both dashboard columns"
+  )
+
+  local status_selection = session.panels.status.selected
+  vim.cmd("NGitLog")
+  truthy(vim.wait(10000, function()
+    return session.current_view == "commits"
+      and session.active_panel == "commits"
+      and session.current_diff
+  end, 10))
+  equal(status_selection, session.panels.status.selected)
+  equal("visible commit", session.panels.commits.entries[1].commit.subject)
+
+  session:switch_view("branches")
+  truthy(vim.wait(10000, function()
+    return session.current_view == "branches" and session.current_diff
+  end, 10))
+  session:select_relative(1)
+  local branch_selection = session.panels.branches.selected
+  session:switch_view("status")
+  session:switch_view("branches")
+  equal(branch_selection, session.panels.branches.selected)
+
+  session:switch_view("stashes")
+  truthy(vim.wait(10000, function()
+    return session.current_view == "stashes" and session.current_diff
+  end, 10))
+  truthy(session.panels.stashes.entries[1].stash.subject:find("visible stash", 1, true))
+
+  local stash_lines =
+    vim.api.nvim_buf_get_lines(session.dashboard.panels.stashes.buffer, 0, -1, false)
+  truthy(table.concat(stash_lines, "\n"):find("visible stash", 1, true))
+  local commit_extmarks = vim.api.nvim_buf_get_extmarks(
+    session.dashboard.panels.commits.buffer,
+    session.dashboard.namespace,
+    0,
+    -1,
+    { details = true }
+  )
+  local commit_groups = {}
+  for _, mark in ipairs(commit_extmarks) do
+    commit_groups[mark[4].hl_group] = true
+  end
+  truthy(commit_groups.NgitCommitHash)
+  truthy(commit_groups.NgitDate)
+  local action_lines = vim.api.nvim_buf_get_lines(session.dashboard.actions.buffer, 0, -1, false)
+  truthy(table.concat(action_lines, ""):find("Apply", 1, true))
+  truthy(
+    vim.fn.strdisplaywidth(action_lines[1])
+      <= vim.api.nvim_win_get_width(session.dashboard.actions.window)
+  )
+  session.dashboard:resize()
+  equal(1, vim.api.nvim_win_get_height(session.dashboard.actions.window))
+  local dashboard_buffers = session.dashboard:all_buffers()
+  require("ngit").close()
+  equal(2, vim.o.laststatus)
+  equal("GLOBAL STATUSLINE SENTINEL", vim.go.statusline)
+  truthy(lualine_hide_calls[#lualine_hide_calls].unhide == true)
+  package.loaded.lualine = previous_lualine
+  require("ngit").setup()
+  vim.go.statusline = previous_statusline
+  vim.o.laststatus = previous_laststatus
+  for _, buffer in ipairs(dashboard_buffers) do
+    equal(false, vim.api.nvim_buf_is_valid(buffer))
+  end
 end)
 
 io.stdout:write(("\n%d passed, %d failed\n"):format(passed, #failures))

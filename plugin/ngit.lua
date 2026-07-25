@@ -25,3 +25,15 @@ end, {
   desc = "Refresh the current ngit view",
 })
 
+for command, view in pairs({
+  NGitLog = "commits",
+  NGitBranches = "branches",
+  NGitStashes = "stashes",
+}) do
+  local selected_view = view
+  vim.api.nvim_create_user_command(command, function()
+    require("ngit").open({ view = selected_view })
+  end, {
+    desc = ("Open the ngit %s view"):format(selected_view),
+  })
+end

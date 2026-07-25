@@ -33,4 +33,3 @@ function M.discover(cwd, callback)
 end
 
 return M
-

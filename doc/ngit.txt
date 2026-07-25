@@ -7,14 +7,17 @@ CONTENTS                                                        *ngit-contents*
 2. Commands.........................................................|ngit-commands|
 3. Mappings.........................................................|ngit-mappings|
 4. Configuration.................................................|ngit-configure|
-5. Safety and performance...........................................|ngit-safety|
+5. Highlighting................................................|ngit-highlights|
+6. Safety and performance...........................................|ngit-safety|
 
 ==============================================================================
 1. INTRODUCTION                                               *ngit-introduction*
 
-ngit displays changed files and a lazy-loaded unified diff in a dedicated
-tabpage. Its primary workflow is reviewing, navigating, staging, and unstaging
-changes without leaving Neovim.
+ngit displays Changes, Branches, Commits, and Stashes in persistent native
+Neovim windows on the left and a lazy-loaded structured diff on the right.
+The diff uses aligned old/new panes when space allows and a polished unified
+view in narrower windows. A one-line footer shows actions relevant to the
+focused panel.
 
 Requirements:
   - Neovim 0.10 or newer
@@ -37,6 +40,18 @@ Requirements:
 :NGitClose
         Close the active view and return to the previous tabpage.
 
+                                                              *:NGitLog*
+:NGitLog
+        Open ngit and focus the paginated Commits panel.
+
+                                                              *:NGitBranches*
+:NGitBranches
+        Open ngit and focus the local and remote Branches panel.
+
+                                                              *:NGitStashes*
+:NGitStashes
+        Open ngit and focus the Stashes panel.
+
 ==============================================================================
 3. MAPPINGS                                                       *ngit-mappings*
 
@@ -44,13 +59,21 @@ Mappings are local to ngit-owned buffers.
 
 q               Close the view.
 r               Refresh status and the selected diff.
-j               Select the next changed file from the file panel.
-k               Select the previous changed file from the file panel.
+j               Select the next item in the focused panel.
+k               Select the previous item in the focused panel.
 <CR>            Focus the selected diff.
-<Tab>           Select the next changed file.
-<S-Tab>         Select the previous changed file.
+<Esc>           Return from the preview to the active panel.
+<Tab>           Focus the next dashboard panel.
+<S-Tab>         Focus the previous dashboard panel.
+1               Focus Changes.
+2               Focus Branches.
+3               Focus Commits.
+4               Focus Stashes.
 ]c              Jump to the next hunk.
 [c              Jump to the previous hunk.
+]f              Jump to the next changed file in the preview.
+[f              Jump to the previous changed file in the preview.
+dv              Toggle side-by-side and unified diff layouts.
 s               Stage the selected file, or current hunk in the diff.
 u               Unstage the selected file, or current hunk in the diff.
 X               Discard tracked worktree changes after confirmation.
@@ -59,6 +82,28 @@ o               Open the selected file.
 <Leader>e       Focus the file panel.
 <Leader>d       Focus the diff panel.
 ?               Show contextual help.
+gs              Focus Changes.
+gl              Focus paginated Commits.
+gb              Focus local and remote Branches.
+gz              Focus Stashes.
+x               Switch branch, or copy a commit hash.
+n               Create a branch or stash.
+a               Apply the selected stash.
+p               Pop the selected stash.
+D               Delete a merged local branch or drop a stash.
+L               Load another page of commits.
+c               Create a commit in a gitcommit buffer.
+C               Amend HEAD in a gitcommit buffer.
+f               Fetch all remotes and prune stale refs.
+U               Pull with fast-forward-only semantics.
+P               Push normally. Force push is not exposed.
+co              Resolve the selected conflict with ours and stage it.
+ct              Resolve the selected conflict with theirs and stage it.
+gC              Continue an active merge, rebase, cherry-pick, or revert.
+gA              Confirm and abort the active Git operation.
+m               Merge the selected branch into the current branch.
+R               Rebase the current branch onto the selected branch.
+v               Cherry-pick the selected commit.
 
 ==============================================================================
 4. CONFIGURATION                                                 *ngit-configure*
@@ -72,8 +117,13 @@ Configuration is optional. Defaults work without calling setup().
     refresh_debounce_ms = 120,
     max_diff_bytes = 2 * 1024 * 1024,
     cache_entries = 24,
+    commit_limit = 150,
+    layout = "dashboard",
+    diff_layout = "auto",
+    side_by_side_min_width = 80,
     file_panel_width = 0.32,
     file_panel_height = 0.35,
+    hide_statusline = true,
     auto_refresh = true,
     confirm_discard = true,
   })
@@ -95,16 +145,39 @@ max_diff_bytes
 cache_entries
         Maximum number of file diffs retained in memory.
 
+commit_limit
+        Number of commits loaded per page. Press L to load another page.
+
+layout
+        The default is "dashboard", keeping all repository panels visible and
+        the patch on the right. Former values "vertical", "stacked", and
+        "auto" remain accepted as compatibility aliases and normalize to the
+        dashboard.
+
+diff_layout
+        "auto", "side_by_side", or "unified". Auto uses aligned old/new panes
+        when the preview has enough space and unified presentation otherwise.
+
+side_by_side_min_width
+        Minimum preview width used by the automatic side-by-side layout.
+
+hide_statusline
+        Collapse native split statuslines into one blank global row while the
+        ngit tab is active. If lualine is loaded, its statusline renderer is
+        suspended. The previous statusline mode is restored when leaving or
+        closing ngit.
+
 file_panel_width
         A fraction below 1, or an absolute window width.
 
 file_panel_height
-        A fraction below 1, or an absolute file-panel height used when the
-        editor is too narrow for a side-by-side layout.
+        Retained for configuration compatibility. Dashboard panel heights are
+        allocated automatically from the available editor height.
 
 auto_refresh
         Refresh an open view after buffer writes, shell commands, and focus
-        changes.
+        changes. Buffer writes reload working-tree status only; shell and focus
+        events reload every repository collection.
 
 confirm_discard
         Ask before restoring tracked worktree changes.
@@ -116,18 +189,38 @@ mappings
         Buffer-local mappings. Set a mapping to false to disable it.
 
 ==============================================================================
-5. SAFETY AND PERFORMANCE                                         *ngit-safety*
+5. HIGHLIGHTING                                               *ngit-highlights*
+
+Diff lines use NgitDiffAdd, NgitDiffDelete, NgitDiffChange, and NgitDiffText.
+Headers and alignment rows use NgitDiffHeader and NgitDiffFiller. Source syntax
+highlighting is enabled when a preview contains one recognizable file type.
+
+Dashboard fields use NgitCommitHash, NgitCommitType, NgitDate, NgitDecoration,
+NgitBranchLocal, NgitBranchRemote, NgitUpstream, NgitStashRef, and NgitPath.
+All groups have default links and may be overridden after setup().
+
+==============================================================================
+6. SAFETY AND PERFORMANCE                                         *ngit-safety*
 
 Git is invoked asynchronously with argument arrays and literal pathspecs.
 Read-only commands avoid optional repository locks. Status is parsed from
 NUL-delimited porcelain-v2 output.
 
-Only the selected file's diff is loaded. Rapid selection changes are
-debounced, superseded diff jobs are terminated, and recent diffs are stored in
-a bounded cache.
+Changes, branches, commits, and stashes load independently and asynchronously.
+Only the active panel's selected file, commit, branch, or stash preview is
+loaded. Changing panel focus does not reload collection data. Commit history is
+paginated. Rapid selection changes are debounced, superseded jobs are
+terminated, and recent previews are stored in a bounded cache.
+Each raw patch is parsed once into a semantic presentation model. Toggling
+between split and unified presentation does not run another Git command.
+Unified presentation is built lazily only when it is displayed. On narrow
+screens the preview falls back to unified mode; editor areas smaller than 40
+columns by 16 lines are rejected before any dashboard tab is created.
 
 Discard only restores tracked worktree files. ngit does not delete untracked
-files.
+files. Branch deletion uses Git's merged-only behavior, pull is
+fast-forward-only, and force push is not exposed. Remote progress appears in
+a cancellable floating console.
 
 ==============================================================================
 vim:tw=78:ts=8:noet:ft=help:norl:

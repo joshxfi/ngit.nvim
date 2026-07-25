@@ -20,4 +20,14 @@ jobs:
         with:
           version: ${{ matrix.neovim }}
           neovim: true
-      - run: make test
+      - run: make check
+
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: JohnnyMorganz/stylua-action@v4
+        with:
+          version: v2.1.0
+          token: ${{ secrets.GITHUB_TOKEN }}
+          args: --check lua plugin tests

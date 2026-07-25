@@ -28,6 +28,10 @@ local function command_for(args)
   return command
 end
 
+function M.command(args)
+  return command_for(args)
+end
+
 ---@param args string[]
 ---@param opts? { cwd?: string, stdin?: string, readonly?: boolean, text?: boolean, max_stdout_bytes?: integer }
 ---@param callback fun(result: NgitGitResult)
@@ -115,6 +119,60 @@ function M.error_message(result)
     message = ("Git exited with status %d"):format(result.code)
   end
   return message
+end
+
+---@param args string[]
+---@param opts? { cwd?: string }
+---@param on_chunk fun(stream: "stdout"|"stderr", data: string)
+---@param callback fun(result: NgitGitResult)
+---@return vim.SystemObj?
+function M.run_stream(args, opts, on_chunk, callback)
+  opts = opts or {}
+  local command = command_for(args)
+  local env = {
+    LC_ALL = "C",
+    GIT_PAGER = "cat",
+    GIT_TERMINAL_PROMPT = "0",
+  }
+  local function stream(kind)
+    return function(err, data)
+      if err or not data or data == "" then
+        return
+      end
+      vim.schedule(function()
+        on_chunk(kind, data)
+      end)
+    end
+  end
+
+  local ok, process = pcall(vim.system, command, {
+    cwd = opts.cwd,
+    env = env,
+    text = true,
+    stdout = stream("stdout"),
+    stderr = stream("stderr"),
+  }, function(result)
+    schedule(callback, {
+      code = result.code,
+      signal = result.signal,
+      stdout = "",
+      stderr = "",
+      command = command,
+      truncated = false,
+    })
+  end)
+  if not ok then
+    schedule(callback, {
+      code = 127,
+      signal = 0,
+      stdout = "",
+      stderr = tostring(process),
+      command = command,
+      truncated = false,
+    })
+    return nil
+  end
+  return process
 end
 
 return M
