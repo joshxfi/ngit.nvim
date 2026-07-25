@@ -95,10 +95,11 @@ From the file panel, `s` and `u` act on the whole file. From a hunk in the diff
 panel, they stage or unstage only that hunk. Hunk operations are deliberately
 disabled when the preview was truncated.
 
-Focus dashboard panels without closing ngit:
+Focus dashboard areas without closing ngit:
 
 | Mapping | View |
 | --- | --- |
+| `0` | Selected diff |
 | `1` or `gs` | Working-tree changes |
 | `2` or `gb` | Local and remote branches |
 | `3` or `gl` | Commit history |
@@ -131,7 +132,8 @@ All mappings are buffer-local.
 | `X` | Discard tracked worktree changes after confirmation |
 | `o` | Open selected file |
 | `/` | Filter changed files |
-| `<leader>e` / `<leader>d` | Focus files/diff |
+| `0` | Focus the selected diff |
+| `<leader>e` | Return to the active side panel |
 | `?` | Show help |
 | `x` | Switch branch, or copy a selected commit hash |
 | `n` | Create a branch or stash |

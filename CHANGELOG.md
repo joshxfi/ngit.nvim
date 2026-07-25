@@ -9,6 +9,7 @@
   preserving explicit user overrides.
 - Kept file-state circle markers foreground-only so themes cannot add boxed
   backgrounds around them.
+- Added `0` as the default direct shortcut for focusing the selected diff.
 - Prevented manual side-by-side selection when the preview is too narrow.
 - Split session refresh, mapping, and command orchestration into focused
   modules and added reproducible median-based parser benchmarks.

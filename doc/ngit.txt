@@ -80,7 +80,7 @@ X               Discard tracked worktree changes after confirmation.
 o               Open the selected file.
 /               Filter the file list.
 <Leader>e       Focus the file panel.
-<Leader>d       Focus the diff panel.
+0               Focus the selected diff.
 ?               Show contextual help.
 gs              Focus Changes.
 gl              Focus paginated Commits.

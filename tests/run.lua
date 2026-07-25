@@ -329,6 +329,7 @@ test("dashboard is the default layout with configurable panel navigation", funct
   equal("<S-Tab>", defaults.mappings.prev_panel)
   equal("1", defaults.mappings.focus_status)
   equal("4", defaults.mappings.focus_stashes)
+  equal("0", defaults.mappings.focus_preview)
   equal("auto", defaults.diff_layout)
   equal(true, defaults.hide_statusline)
   equal("dv", defaults.mappings.toggle_diff)
