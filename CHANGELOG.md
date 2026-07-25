@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Made streaming remote output chunk-safe and bounded without repeated
+  whole-buffer copies.
+- Bounded cached preview models by both entry count and estimated memory.
+- Made theme-derived diff colors refresh after colorscheme changes while
+  preserving explicit user overrides.
+- Kept file-state circle markers foreground-only so themes cannot add boxed
+  backgrounds around them.
+- Prevented manual side-by-side selection when the preview is too narrow.
+- Split session refresh, mapping, and command orchestration into focused
+  modules and added reproducible median-based parser benchmarks.
 - Added aligned side-by-side diffs with responsive unified fallback, full-line
   backgrounds, intraline emphasis, source line numbers, and syntax highlighting.
 - Replaced raw Git plumbing in previews with structured file and hunk headers.

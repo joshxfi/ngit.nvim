@@ -11,16 +11,18 @@ Requirements:
 - Neovim 0.10 or newer
 - Git
 
-Run the complete test suite and parser benchmarks:
+Run the complete checks, formatting verification, and parser benchmarks:
 
 ```sh
-make test
+make check
+make format-check
 make benchmark
 ```
 
 Tests create disposable repositories under Neovim's temporary directory. Add
 an integration test for every Git mutation, including its failure or conflict
-state where applicable.
+state where applicable. The benchmark uses generated fixtures, warm-up runs,
+and median timings; it excludes Git process startup, disk I/O, and rendering.
 
 ## Architecture
 

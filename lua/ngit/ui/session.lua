@@ -1,18 +1,16 @@
 local config_module = require("ngit.config")
 local actions = require("ngit.ui.actions")
 local branch_backend = require("ngit.git.branch")
-local conflict_backend = require("ngit.git.conflict")
 local diff_backend = require("ngit.git.diff")
 local log_backend = require("ngit.git.log")
-local mutate = require("ngit.git.mutate")
-local remote_backend = require("ngit.git.remote")
-local sequencer_backend = require("ngit.git.sequencer")
 local stash_backend = require("ngit.git.stash")
-local status_backend = require("ngit.git.status")
 local Dashboard = require("ngit.ui.dashboard")
 local DiffView = require("ngit.ui.diff_view")
 local Help = require("ngit.ui.help")
 local Render = require("ngit.ui.render")
+local SessionCommands = require("ngit.ui.session_commands")
+local SessionMappings = require("ngit.ui.session_mappings")
+local SessionRefresh = require("ngit.ui.session_refresh")
 local Lru = require("ngit.util.lru")
 
 local Session = {}
@@ -32,6 +30,12 @@ local section_highlights = {
   staged = "NgitStaged",
   unstaged = "NgitUnstaged",
   untracked = "NgitUntracked",
+}
+local section_sign_highlights = {
+  conflict = "NgitConflictSign",
+  staged = "NgitStagedSign",
+  unstaged = "NgitUnstagedSign",
+  untracked = "NgitUntrackedSign",
 }
 
 local function valid_window(window)
@@ -155,7 +159,6 @@ function Session.new(root)
     selected = 1,
     filter = nil,
     generation = 0,
-    status_request = 0,
     operation_request = 0,
     diff_request = 0,
     diff_job = nil,
@@ -169,7 +172,12 @@ function Session.new(root)
     last_result = "",
     last_result_ok = nil,
   }, Session)
-  self.cache = Lru.new(self.config.cache_entries)
+  self.cache = Lru.new(self.config.cache_entries, {
+    max_weight = self.config.max_cache_bytes,
+    weigh = function(diff)
+      return diff.estimated_bytes or #(diff.text or "")
+    end,
+  })
   return self
 end
 
@@ -270,142 +278,7 @@ function Session:set_statusline_hidden(hidden)
 end
 
 function Session:install_mappings()
-  local mappings = self.config.mappings
-  local panel_buffers = {}
-  local all_buffers = self.dashboard:all_buffers()
-  for _, id in ipairs(Dashboard.panel_order) do
-    panel_buffers[id] = self.dashboard.panels[id].buffer
-    all_buffers[#all_buffers + 1] = panel_buffers[id]
-  end
-
-  local function map(key, callback, description, buffers)
-    if not key or key == false or key == "" then
-      return
-    end
-    for _, buffer in ipairs(buffers or all_buffers) do
-      vim.keymap.set("n", key, callback, {
-        buffer = buffer,
-        silent = true,
-        nowait = true,
-        desc = "ngit: " .. description,
-      })
-    end
-  end
-
-  for _, id in ipairs(Dashboard.panel_order) do
-    local selected_id = id
-    map(mappings.next_item, function()
-      self:focus_panel(selected_id)
-      self:select_relative(1)
-    end, "next item", { panel_buffers[id] })
-    map(mappings.prev_item, function()
-      self:focus_panel(selected_id)
-      self:select_relative(-1)
-    end, "previous item", { panel_buffers[id] })
-    map(mappings.select, function()
-      self:focus_panel(selected_id)
-      self.dashboard:focus_preview()
-    end, "focus selected preview", { panel_buffers[id] })
-  end
-
-  map(mappings.next_panel, function()
-    self:focus_relative_panel(1)
-  end, "next panel")
-  map(mappings.prev_panel, function()
-    self:focus_relative_panel(-1)
-  end, "previous panel")
-  map(mappings.status_view, function()
-    self:focus_panel("status")
-  end, "status panel")
-  map(mappings.commit_view, function()
-    self:focus_panel("commits")
-  end, "commits panel")
-  map(mappings.branch_view, function()
-    self:focus_panel("branches")
-  end, "branches panel")
-  map(mappings.stash_view, function()
-    self:focus_panel("stashes")
-  end, "stashes panel")
-  map(mappings.focus_status, function()
-    self:focus_panel("status")
-  end, "status panel")
-  map(mappings.focus_branches, function()
-    self:focus_panel("branches")
-  end, "branches panel")
-  map(mappings.focus_commits, function()
-    self:focus_panel("commits")
-  end, "commits panel")
-  map(mappings.focus_stashes, function()
-    self:focus_panel("stashes")
-  end, "stashes panel")
-  map(mappings.next_file, function()
-    self:select_relative(1)
-  end, "next item")
-  map(mappings.prev_file, function()
-    self:select_relative(-1)
-  end, "previous item")
-  local preview_buffers = {
-    self.dashboard.preview.left.buffer,
-    self.dashboard.preview.right.buffer,
-    self.dashboard.preview.unified.buffer,
-  }
-  map(mappings.next_hunk, function()
-    self:jump_hunk(1)
-  end, "next hunk", preview_buffers)
-  map(mappings.prev_hunk, function()
-    self:jump_hunk(-1)
-  end, "previous hunk", preview_buffers)
-  map(mappings.next_diff_file, function()
-    self:jump_diff_file(1)
-  end, "next diff file", preview_buffers)
-  map(mappings.prev_diff_file, function()
-    self:jump_diff_file(-1)
-  end, "previous diff file", preview_buffers)
-  map(mappings.toggle_diff, function()
-    self:toggle_diff_layout()
-  end, "toggle diff layout", preview_buffers)
-  map(mappings.stage, function()
-    self:stage()
-  end, "stage hunk", preview_buffers)
-  map(mappings.unstage, function()
-    self:unstage()
-  end, "unstage hunk", preview_buffers)
-  map(mappings.focus_files, function()
-    self:focus_panel(self.active_panel)
-  end, "focus active panel")
-  map(mappings.focus_preview, function()
-    self.dashboard:focus_preview()
-  end, "focus preview")
-  map("<Esc>", function()
-    self:focus_panel(self.active_panel)
-  end, "return to active panel", preview_buffers)
-
-  for _, action in ipairs(actions.definitions()) do
-    local key = mappings[action.mapping]
-    local buffers = {}
-    if action.global then
-      buffers = all_buffers
-    elseif action.panels then
-      for _, id in ipairs(Dashboard.panel_order) do
-        if action.panels[id] then
-          buffers[#buffers + 1] = panel_buffers[id]
-        end
-      end
-    elseif action.panel_only then
-      for _, id in ipairs(Dashboard.panel_order) do
-        buffers[#buffers + 1] = panel_buffers[id]
-      end
-    end
-    if #buffers > 0 then
-      local selected_action = action
-      map(key, function()
-        local method = self[selected_action.method]
-        if method then
-          method(self, unpack(selected_action.args or {}))
-        end
-      end, action.label:lower(), buffers)
-    end
-  end
+  SessionMappings.install(self)
 end
 
 function Session:install_autocommands()
@@ -483,8 +356,10 @@ function Session:install_autocommands()
     callback = function()
       if not self.closed then
         self.dashboard:resize()
-        if self.current_diff_models and not self.diff_layout_override then
-          self:render_diff_layout(self.dashboard:desired_preview_layout())
+        if self.current_diff_models then
+          self:render_diff_layout(
+            self.diff_layout_override or self.dashboard:desired_preview_layout()
+          )
         end
         self:update_actions()
       end
@@ -512,7 +387,6 @@ function Session:dispose()
     return
   end
   self.closed = true
-  self.status_request = self.status_request + 1
   self.operation_request = self.operation_request + 1
   self.refresh_generation = self.refresh_generation + 1
   self.diff_request = self.diff_request + 1
@@ -572,23 +446,7 @@ function Session:close()
 end
 
 function Session:schedule_refresh(scope)
-  scope = scope or "full"
-  if scope == "full" or not self.pending_refresh_scope then
-    self.pending_refresh_scope = scope
-  end
-  self.refresh_timer = (self.refresh_timer or 0) + 1
-  local token = self.refresh_timer
-  vim.defer_fn(function()
-    if not self.closed and token == self.refresh_timer then
-      local pending = self.pending_refresh_scope or "full"
-      self.pending_refresh_scope = nil
-      if pending == "status" then
-        self:refresh_status()
-      else
-        self:refresh()
-      end
-    end
-  end, self.config.refresh_debounce_ms)
+  SessionRefresh.schedule(self, scope)
 end
 
 function Session:switch_view(view)
@@ -652,230 +510,11 @@ function Session:update_actions()
 end
 
 function Session:refresh()
-  if self.closed then
-    return
-  end
-  self.refresh_generation = self.refresh_generation + 1
-  self.generation = self.refresh_generation
-  local generation = self.refresh_generation
-  self.cache:clear()
-  self.diff_request = self.diff_request + 1
-  if self.diff_job then
-    pcall(self.diff_job.kill, self.diff_job, 15)
-    self.diff_job = nil
-  end
-
-  local preferred = {}
-  for id, panel in pairs(self.panels) do
-    preferred[id] = entry_key(panel.entries[panel.selected])
-    panel.request = panel.request + 1
-    panel.loading = true
-    panel.error = nil
-    if panel.job then
-      pcall(panel.job.kill, panel.job, 15)
-      panel.job = nil
-    end
-    panel.entries = {}
-    panel.row_entries = {}
-    self.dashboard:render_panel(id, {
-      lines = { "", ("  Loading %s…"):format(id) },
-      count = 0,
-      selected = 0,
-      empty = true,
-      detail = "refreshing",
-    })
-  end
-  self:sync_active_aliases()
-
-  self.operation = nil
-  self.operation_request = self.operation_request + 1
-  local operation_request = self.operation_request
-  if self.operation_job then
-    pcall(self.operation_job.kill, self.operation_job, 15)
-    self.operation_job = nil
-  end
-
-  local status_panel = self.panels.status
-  local status_request = status_panel.request
-  local status_job
-  status_job = status_backend.load(self.root, function(status, err)
-    if status_panel.job == status_job then
-      status_panel.job = nil
-    end
-    if self.status_job == status_job then
-      self.status_job = nil
-    end
-    if
-      self.closed
-      or generation ~= self.refresh_generation
-      or status_request ~= status_panel.request
-    then
-      return
-    end
-    if not status then
-      self:render_panel_error("status", err or "Unable to load Git status")
-      return
-    end
-
-    self.status = status
-    status_panel.data = status
-    status_panel.loading = false
-    self:render_files(preferred.status)
-    if self.active_panel == "status" then
-      self:load_preview()
-    end
-  end)
-  status_panel.job = status_job
-  self.status_job = status_job
-
-  local operation_job
-  operation_job = sequencer_backend.detect(self.root, function(operation)
-    if self.operation_job == operation_job then
-      self.operation_job = nil
-    end
-    if
-      self.closed
-      or generation ~= self.refresh_generation
-      or operation_request ~= self.operation_request
-    then
-      return
-    end
-    self.operation = operation
-    if self.status then
-      self:render_files(preferred.status)
-    end
-    self:update_actions()
-  end)
-  self.operation_job = operation_job
-
-  local function load_collection(id, start)
-    local panel = self.panels[id]
-    local request = panel.request
-    local collection_job
-    collection_job = start(function(items, has_more, err)
-      if panel.job == collection_job then
-        panel.job = nil
-      end
-      if self.closed or generation ~= self.refresh_generation or request ~= panel.request then
-        return
-      end
-      if not items then
-        self:render_panel_error(id, err or ("Unable to load " .. id))
-        return
-      end
-      panel.data = items
-      panel.has_more = has_more == true
-      panel.loading = false
-      self:render_collection(id, preferred[id])
-      if self.active_panel == id then
-        self:load_preview()
-      end
-    end)
-    panel.job = collection_job
-  end
-
-  load_collection("commits", function(done)
-    return log_backend.list(
-      self.root,
-      { limit = self.config.commit_limit },
-      function(items, has_more, err)
-        done(items, has_more, err)
-      end
-    )
-  end)
-  load_collection("branches", function(done)
-    return branch_backend.list(self.root, function(items, err)
-      done(items, false, err)
-    end)
-  end)
-  load_collection("stashes", function(done)
-    return stash_backend.list(self.root, function(items, err)
-      done(items, false, err)
-    end)
-  end)
-  self:update_actions()
+  SessionRefresh.full(self)
 end
 
 function Session:refresh_status()
-  if self.closed then
-    return
-  end
-  local panel = self.panels.status
-  local preferred = entry_key(panel.entries[panel.selected])
-  self.generation = self.generation + 1
-  panel.request = panel.request + 1
-  panel.loading = true
-  panel.error = nil
-  local request = panel.request
-
-  if panel.job then
-    pcall(panel.job.kill, panel.job, 15)
-    panel.job = nil
-  end
-  if self.status_job then
-    pcall(self.status_job.kill, self.status_job, 15)
-    self.status_job = nil
-  end
-  if self.active_panel == "status" then
-    self.diff_request = self.diff_request + 1
-    self.current_diff = nil
-    self.current_diff_models = nil
-    self.current_diff_opts = nil
-    if self.diff_job then
-      pcall(self.diff_job.kill, self.diff_job, 15)
-      self.diff_job = nil
-    end
-    self.dashboard:render_preview({ "", "  Refreshing working tree…" }, "Changes")
-  end
-
-  local status_job
-  status_job = status_backend.load(self.root, function(status, err)
-    if panel.job == status_job then
-      panel.job = nil
-    end
-    if self.status_job == status_job then
-      self.status_job = nil
-    end
-    if self.closed or request ~= panel.request then
-      return
-    end
-    if not status then
-      self:render_panel_error("status", err or "Unable to load Git status")
-      return
-    end
-    self.status = status
-    panel.data = status
-    panel.loading = false
-    self:render_files(preferred)
-    if self.active_panel == "status" then
-      self:load_preview()
-    end
-  end)
-  panel.job = status_job
-  self.status_job = status_job
-
-  self.operation_request = self.operation_request + 1
-  local operation_request = self.operation_request
-  if self.operation_job then
-    pcall(self.operation_job.kill, self.operation_job, 15)
-    self.operation_job = nil
-  end
-  local operation_job
-  operation_job = sequencer_backend.detect(self.root, function(operation)
-    if self.operation_job == operation_job then
-      self.operation_job = nil
-    end
-    if self.closed or operation_request ~= self.operation_request then
-      return
-    end
-    self.operation = operation
-    if self.status then
-      self:render_files(preferred)
-    end
-    self:update_actions()
-  end)
-  self.operation_job = operation_job
-  self:update_actions()
+  SessionRefresh.status(self)
 end
 
 function Session:render_panel_error(id, message)
@@ -924,7 +563,7 @@ function Session:render_files(preferred_key)
         local rendered = Render.status(
           sign_for(self.config, entry),
           display_path(entry),
-          section_highlights[entry.section]
+          section_sign_highlights[entry.section]
         )
         lines[#lines + 1] = rendered.text
         for _, span in ipairs(rendered.spans) do
@@ -985,10 +624,6 @@ function Session:render_files(preferred_key)
     self:sync_active_aliases()
     self:update_actions()
   end
-end
-
-function Session:refresh_collection()
-  self:refresh()
 end
 
 function Session:render_collection(view, preferred_key)
@@ -1237,13 +872,22 @@ function Session:render_diff_layout(layout)
   if not self.current_diff or not self.current_diff_models then
     return
   end
+  if layout == "side_by_side" and not self.dashboard:supports_side_by_side() then
+    layout = "unified"
+    self.diff_layout_override = nil
+  end
   if layout == "unified" and not self.current_diff_models.unified then
     self.current_diff_models.unified =
       DiffView.unified(self.current_diff, self.current_diff_opts, self.current_diff_models.split)
   end
-  self.dashboard:render_diff(self.current_diff_models, layout, DiffView.filetype(self.current_diff))
+  local rendered_layout = self.dashboard:render_diff(
+    self.current_diff_models,
+    layout,
+    DiffView.filetype(self.current_diff)
+  )
   self.preview_win = self.dashboard.preview.window
   self.preview_buf = self.dashboard.preview.buffer
+  return rendered_layout
 end
 
 function Session:preview_pane()
@@ -1348,414 +992,33 @@ function Session:toggle_diff_layout()
   if not self.current_diff_models or not self.current_diff then
     return
   end
-  self.diff_layout_override = self.dashboard.preview.layout == "side_by_side" and "unified"
-    or "side_by_side"
-  self:render_diff_layout(self.diff_layout_override)
+  local requested = self.dashboard.preview.layout == "side_by_side" and "unified" or "side_by_side"
+  if requested == "side_by_side" and not self.dashboard:supports_side_by_side() then
+    self.diff_layout_override = nil
+    notify("Side-by-side diff needs at least 40 preview columns", vim.log.levels.WARN)
+    self:render_diff_layout("unified")
+    return
+  end
+  self.diff_layout_override = requested
+  self:render_diff_layout(requested)
 end
 
-function Session:after_mutation(ok, err)
-  if not ok then
-    self:set_result(err or "Git operation failed", false)
-    notify(err or "Git operation failed", vim.log.levels.ERROR)
-    return
-  end
-  self:set_result("Git operation completed", true)
-  self:refresh()
-end
-
-function Session:stage()
-  if self.active_panel ~= "status" then
-    return
-  end
-  local entry = self:selected_entry()
-  if not entry or entry.section == "staged" then
-    return
-  end
-  local patch = entry.section == "unstaged" and self:mutation_patch() or nil
-  if patch then
-    mutate.apply_cached(self.root, patch, false, function(ok, err)
-      self:after_mutation(ok, err)
-    end)
-  else
-    mutate.stage_file(self.root, entry.file.path, function(ok, err)
-      self:after_mutation(ok, err)
-    end)
-  end
-end
-
-function Session:unstage()
-  if self.active_panel ~= "status" then
-    return
-  end
-  local entry = self:selected_entry()
-  if not entry or entry.section ~= "staged" then
-    return
-  end
-  local patch = self:mutation_patch()
-  local function apply(full_patch)
-    mutate.apply_cached(self.root, full_patch, true, function(ok, err)
-      self:after_mutation(ok, err)
-    end)
-  end
-  if patch then
-    apply(patch)
-    return
-  end
-  mutate.unstage_file(self.root, entry.file.path, function(ok, err)
-    self:after_mutation(ok, err)
-  end)
-end
-
-function Session:discard()
-  if self.active_panel ~= "status" then
-    return
-  end
-  local entry = self:selected_entry()
-  if not entry or entry.section ~= "unstaged" then
-    return
-  end
-  if entry.file.kind == "untracked" then
-    notify("ngit does not delete untracked files", vim.log.levels.WARN)
-    return
-  end
-
-  local absolute_path = vim.fs.joinpath(self.root, entry.file.path)
-  local buffer = vim.fn.bufnr(absolute_path)
-  if buffer ~= -1 and vim.api.nvim_buf_is_loaded(buffer) and vim.bo[buffer].modified then
-    notify(
-      "Save or discard the modified Neovim buffer before restoring this file",
-      vim.log.levels.WARN
-    )
-    return
-  end
-
-  local function perform()
-    mutate.discard_file(self.root, entry.file.path, function(ok, err)
-      self:after_mutation(ok, err)
-    end)
-  end
-  if not self.config.confirm_discard then
-    perform()
-    return
-  end
-  vim.ui.select({ "Cancel", "Discard" }, {
-    prompt = ("Discard worktree changes in %s?"):format(entry.file.path),
-  }, function(choice)
-    if choice == "Discard" then
-      perform()
-    end
-  end)
-end
-
-function Session:open_file()
-  if self.active_panel ~= "status" then
-    return
-  end
-  local entry = self:selected_entry()
-  if not entry then
-    return
-  end
-  local path = vim.fs.joinpath(self.root, entry.file.path)
-  if not vim.uv.fs_stat(path) then
-    notify("The selected file does not exist in the worktree", vim.log.levels.WARN)
-    return
-  end
-  self:close()
-  vim.cmd.edit(vim.fn.fnameescape(path))
-end
-
-function Session:prompt_filter()
-  local panel_id = self.active_panel
-  local panel = self:active_state()
-  vim.ui.input({
-    prompt = ("Filter %s: "):format(panel_id),
-    default = panel.filter or "",
-  }, function(value)
-    if value == nil or self.closed then
-      return
-    end
-    panel.filter = value ~= "" and value or nil
-    if panel_id == "status" then
-      self:render_files()
-    else
-      self:render_collection(panel_id)
-    end
-    self:sync_active_aliases()
-    self:load_preview()
-  end)
-end
-
-function Session:primary_action()
-  local entry = self:selected_entry()
-  if not entry then
-    return
-  end
-  if entry.kind == "branch" then
-    if entry.branch.current then
-      notify("Already on " .. entry.branch.name)
-      return
-    end
-    branch_backend.switch(self.root, entry.branch, function(ok, err)
-      self:after_mutation(ok, err)
-    end)
-  elseif entry.kind == "commit" then
-    vim.fn.setreg("+", entry.commit.oid)
-    notify("Copied " .. entry.commit.oid)
-  elseif valid_window(self.preview_win) then
-    vim.api.nvim_set_current_win(self.preview_win)
-  end
-end
-
-function Session:new_item()
-  if self.active_panel == "branches" then
-    vim.ui.input({ prompt = "New branch: " }, function(name)
-      if not name or name == "" or self.closed then
-        return
-      end
-      branch_backend.create(self.root, name, function(ok, err)
-        self:after_mutation(ok, err)
-      end)
-    end)
-  elseif self.active_panel == "stashes" then
-    vim.ui.input({ prompt = "Stash message (optional): " }, function(message)
-      if message == nil or self.closed then
-        return
-      end
-      stash_backend.push(self.root, message, function(ok, err)
-        self:after_mutation(ok, err)
-      end)
-    end)
-  end
-end
-
-function Session:delete_item()
-  local entry = self:selected_entry()
-  if not entry then
-    return
-  end
-  if entry.kind == "branch" then
-    if entry.branch.remote then
-      notify("Deleting remote branches is not supported yet", vim.log.levels.WARN)
-      return
-    elseif entry.branch.current then
-      notify("The current branch cannot be deleted", vim.log.levels.WARN)
-      return
-    end
-    vim.ui.select({ "Cancel", "Delete" }, {
-      prompt = ("Delete merged branch %s?"):format(entry.branch.name),
-    }, function(choice)
-      if choice == "Delete" then
-        branch_backend.delete(self.root, entry.branch.name, false, function(ok, err)
-          self:after_mutation(ok, err)
-        end)
-      end
-    end)
-  elseif entry.kind == "stash" then
-    vim.ui.select({ "Cancel", "Drop" }, {
-      prompt = ("Drop %s permanently?"):format(entry.stash.ref),
-    }, function(choice)
-      if choice == "Drop" then
-        stash_backend.drop(self.root, entry.stash, function(ok, err)
-          self:after_mutation(ok, err)
-        end)
-      end
-    end)
-  end
-end
-
-function Session:apply_item(pop)
-  local entry = self:selected_entry()
-  if not entry or entry.kind ~= "stash" then
-    return
-  end
-  local action = pop and stash_backend.pop or stash_backend.apply
-  action(self.root, entry.stash, function(ok, err)
-    self:after_mutation(ok, err)
-  end)
-end
-
-function Session:prompt_commit(amend)
-  if self.active_panel ~= "status" then
-    return
-  end
-  if self.commit_editor and not self.commit_editor.closed then
-    if valid_window(self.commit_editor.window) then
-      vim.api.nvim_set_current_win(self.commit_editor.window)
-    end
-    return
-  end
-  local function open_editor(message)
-    if self.closed then
-      return
-    end
-    local CommitEditor = require("ngit.ui.commit_editor")
-    self.commit_editor = CommitEditor.new(self.root, {
-      amend = amend,
-      message = message,
-      on_complete = function()
-        self.commit_editor = nil
-        if not self.closed then
-          self:refresh()
-        end
-      end,
-    })
-  end
-  if amend then
-    log_backend.head_message(self.root, function(message, err)
-      if not message then
-        notify(err or "Unable to load the current commit message", vim.log.levels.ERROR)
-        return
-      end
-      open_editor(message)
-    end)
-  else
-    open_editor("")
-  end
-end
-
-function Session:load_more()
-  local panel = self.panels.commits
-  if self.active_panel ~= "commits" or not panel.has_more or panel.job then
-    return
-  end
-  panel.request = panel.request + 1
-  local request = panel.request
-  local existing = #(panel.data or {})
-  local load_more_job
-  load_more_job = log_backend.list(self.root, {
-    limit = self.config.commit_limit,
-    skip = existing,
-  }, function(items, has_more, err)
-    if panel.job == load_more_job then
-      panel.job = nil
-    end
-    if self.closed or request ~= panel.request then
-      return
-    end
-    if not items then
-      notify(err or "Unable to load more commits", vim.log.levels.ERROR)
-      return
-    end
-    vim.list_extend(panel.data, items)
-    panel.has_more = has_more == true
-    self:render_collection("commits", entry_key(panel.entries[panel.selected]))
-    self:update_actions()
-  end)
-  panel.job = load_more_job
-end
-
-function Session:run_remote(operation)
-  if self.remote_console and self.remote_console.running then
-    notify("A remote operation is already running", vim.log.levels.WARN)
-    return
-  end
-  local Console = require("ngit.ui.console")
-  local command_labels = {
-    fetch = "git fetch --all --prune",
-    pull = "git pull --ff-only",
-    push = "git push",
-  }
-  local console = Console.new(command_labels[operation])
-  self.remote_console = console
-  console.process = remote_backend.run(self.root, operation, function(_, data)
-    console:append(data)
-  end, function(ok, result)
-    console:finish(ok, result.code)
-    self:set_result(
-      ok and (operation .. " completed") or (operation .. (" failed (%d)"):format(result.code)),
-      ok
-    )
-    if self.remote_console == console then
-      self.remote_console = nil
-    end
-    if ok and not self.closed then
-      self:refresh()
-    end
-  end)
-end
-
-function Session:choose_conflict(side)
-  if self.active_panel ~= "status" then
-    return
-  end
-  local entry = self:selected_entry()
-  if not entry or entry.section ~= "conflict" then
-    return
-  end
-  conflict_backend.choose(self.root, entry.file.path, side, function(ok, err)
-    self:after_mutation(ok, err)
-  end)
-end
-
-function Session:run_sequencer(action)
-  if not self.operation then
-    notify("No merge, rebase, cherry-pick, or revert is in progress", vim.log.levels.WARN)
-    return
-  end
-  local function perform()
-    sequencer_backend.run(self.root, self.operation, action, function(ok, err)
-      self:after_mutation(ok, err)
-    end)
-  end
-  if action == "abort" then
-    vim.ui.select({ "Cancel", "Abort" }, {
-      prompt = ("Abort the current %s?"):format(self.operation),
-    }, function(choice)
-      if choice == "Abort" then
-        perform()
-      end
-    end)
-  else
-    perform()
-  end
-end
-
-function Session:start_operation(operation)
-  local entry = self:selected_entry()
-  local target
-  local description
-  if operation == "cherry-pick" and entry and entry.kind == "commit" then
-    target = entry.commit.oid
-    description = ("Cherry-pick %s?"):format(short_oid(target))
-  elseif (operation == "merge" or operation == "rebase") and entry and entry.kind == "branch" then
-    if entry.branch.current then
-      notify("Select a different branch", vim.log.levels.WARN)
-      return
-    end
-    target = entry.branch.oid
-    if operation == "merge" then
-      description = ("Merge %s into the current branch?"):format(entry.branch.name)
-    else
-      description = ("Rebase the current branch onto %s?"):format(entry.branch.name)
-    end
-  else
-    return
-  end
-
-  vim.ui.select({ "Cancel", "Continue" }, { prompt = description }, function(choice)
-    if choice ~= "Continue" then
-      return
-    end
-    sequencer_backend.start(self.root, operation, target, function(ok, err)
-      if ok then
-        self:refresh()
-        return
-      end
-      sequencer_backend.detect(self.root, function(active)
-        if active then
-          notify(("%s stopped for conflict resolution"):format(active), vim.log.levels.WARN)
-          if self.active_panel == "status" then
-            self:refresh()
-          else
-            self:switch_view("status")
-          end
-        else
-          notify(err or ("Unable to start " .. operation), vim.log.levels.ERROR)
-        end
-      end)
-    end)
-  end)
-end
+Session.after_mutation = SessionCommands.after_mutation
+Session.stage = SessionCommands.stage
+Session.unstage = SessionCommands.unstage
+Session.discard = SessionCommands.discard
+Session.open_file = SessionCommands.open_file
+Session.prompt_filter = SessionCommands.prompt_filter
+Session.primary_action = SessionCommands.primary_action
+Session.new_item = SessionCommands.new_item
+Session.delete_item = SessionCommands.delete_item
+Session.apply_item = SessionCommands.apply_item
+Session.prompt_commit = SessionCommands.prompt_commit
+Session.load_more = SessionCommands.load_more
+Session.run_remote = SessionCommands.run_remote
+Session.choose_conflict = SessionCommands.choose_conflict
+Session.run_sequencer = SessionCommands.run_sequencer
+Session.start_operation = SessionCommands.start_operation
 
 function Session:help_lines()
   return Help.lines(self.config.mappings)

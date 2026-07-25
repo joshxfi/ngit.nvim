@@ -6,6 +6,7 @@ local M = {}
 ---@field refresh_debounce_ms integer Delay used to coalesce repository refreshes.
 ---@field max_diff_bytes integer Soft limit for a preview before it is truncated.
 ---@field cache_entries integer Maximum number of cached file diffs.
+---@field max_cache_bytes integer Maximum estimated memory retained by cached previews.
 ---@field commit_limit integer Number of commits loaded per page.
 ---@field layout "dashboard"|"vertical"|"stacked"|"auto" Main pane layout.
 ---@field file_panel_width number|integer Fraction or absolute width of the file panel.
@@ -25,6 +26,7 @@ local defaults = {
   refresh_debounce_ms = 120,
   max_diff_bytes = 2 * 1024 * 1024,
   cache_entries = 24,
+  max_cache_bytes = 32 * 1024 * 1024,
   commit_limit = 150,
   layout = "dashboard",
   file_panel_width = 0.32,
@@ -113,6 +115,7 @@ local function validate(opts)
   vim.validate("refresh_debounce_ms", opts.refresh_debounce_ms, "number")
   vim.validate("max_diff_bytes", opts.max_diff_bytes, "number")
   vim.validate("cache_entries", opts.cache_entries, "number")
+  vim.validate("max_cache_bytes", opts.max_cache_bytes, "number")
   vim.validate("commit_limit", opts.commit_limit, "number")
   vim.validate("layout", opts.layout, "string")
   vim.validate("file_panel_width", opts.file_panel_width, "number")
@@ -136,6 +139,9 @@ local function validate(opts)
   end
   if opts.cache_entries < 1 or opts.cache_entries % 1 ~= 0 then
     error("ngit: cache_entries must be a positive integer", 3)
+  end
+  if opts.max_cache_bytes < 1024 or opts.max_cache_bytes % 1 ~= 0 then
+    error("ngit: max_cache_bytes must be an integer of at least 1024", 3)
   end
   if opts.commit_limit < 1 or opts.commit_limit % 1 ~= 0 then
     error("ngit: commit_limit must be a positive integer", 3)

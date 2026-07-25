@@ -117,6 +117,7 @@ Configuration is optional. Defaults work without calling setup().
     refresh_debounce_ms = 120,
     max_diff_bytes = 2 * 1024 * 1024,
     cache_entries = 24,
+    max_cache_bytes = 32 * 1024 * 1024,
     commit_limit = 150,
     layout = "dashboard",
     diff_layout = "auto",
@@ -143,7 +144,11 @@ max_diff_bytes
         previews.
 
 cache_entries
-        Maximum number of file diffs retained in memory.
+        Maximum number of preview models retained in memory.
+
+max_cache_bytes
+        Maximum estimated memory retained by cached preview models. A single
+        preview larger than this budget is displayed but not cached.
 
 commit_limit
         Number of commits loaded per page. Press L to load another page.
@@ -191,13 +196,20 @@ mappings
 ==============================================================================
 5. HIGHLIGHTING                                               *ngit-highlights*
 
-Diff lines use NgitDiffAdd, NgitDiffDelete, NgitDiffChange, and NgitDiffText.
-Headers and alignment rows use NgitDiffHeader and NgitDiffFiller. Source syntax
-highlighting is enabled when a preview contains one recognizable file type.
+Diff lines use NgitDiffAdd, NgitDiffDelete, and NgitDiffChange. Changed text
+within a line uses NgitDiffAddText, NgitDiffDeleteText, or NgitDiffText.
+NgitDiffAddNumber and NgitDiffDeleteNumber color source line-number markers.
+Headers and alignment rows use NgitDiffHeader and NgitDiffFiller. Source
+syntax highlighting is enabled when a preview contains one recognizable file
+type.
 
 Dashboard fields use NgitCommitHash, NgitCommitType, NgitDate, NgitDecoration,
 NgitBranchLocal, NgitBranchRemote, NgitUpstream, NgitStashRef, and NgitPath.
-All groups have default links and may be overridden after setup().
+File markers use the foreground-only NgitStagedSign, NgitUnstagedSign,
+NgitUntrackedSign, and NgitConflictSign groups.
+All groups may be overridden after setup(). Theme-derived diff backgrounds are
+recomputed after :colorscheme while they remain ngit-owned; an explicit user
+override is preserved.
 
 ==============================================================================
 6. SAFETY AND PERFORMANCE                                         *ngit-safety*
@@ -210,7 +222,8 @@ Changes, branches, commits, and stashes load independently and asynchronously.
 Only the active panel's selected file, commit, branch, or stash preview is
 loaded. Changing panel focus does not reload collection data. Commit history is
 paginated. Rapid selection changes are debounced, superseded jobs are
-terminated, and recent previews are stored in a bounded cache.
+terminated, and recent previews are stored in a cache bounded by both entry
+count and estimated bytes. Oversized previews are displayed without caching.
 Each raw patch is parsed once into a semantic presentation model. Toggling
 between split and unified presentation does not run another Git command.
 Unified presentation is built lazily only when it is displayed. On narrow

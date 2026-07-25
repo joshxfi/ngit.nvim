@@ -38,16 +38,6 @@ without losing repository context.
 
 ## Installation
 
-With `vim.pack`:
-
-```lua
-vim.pack.add({ "https://github.com/joshxfi/ngit" })
-
-vim.keymap.set("n", "<leader>ng", "<cmd>NGit<cr>", {
-  desc = "Open ngit",
-})
-```
-
 With lazy.nvim:
 
 ```lua
@@ -66,6 +56,16 @@ With lazy.nvim:
   },
   opts = {},
 }
+```
+
+With `vim.pack`:
+
+```lua
+vim.pack.add({ "https://github.com/joshxfi/ngit" })
+
+vim.keymap.set("n", "<leader>ng", "<cmd>NGit<cr>", {
+  desc = "Open ngit",
+})
 ```
 
 ## Usage
@@ -155,75 +155,23 @@ require("ngit").setup({
   refresh_debounce_ms = 120,
   max_diff_bytes = 2 * 1024 * 1024,
   cache_entries = 24,
+  max_cache_bytes = 32 * 1024 * 1024,
   commit_limit = 150,
-  layout = "dashboard",
   diff_layout = "auto",
   side_by_side_min_width = 80,
   file_panel_width = 0.32,
-  file_panel_height = 0.35,
   hide_statusline = true,
   auto_refresh = true,
   confirm_discard = true,
-  signs = {
-    staged = "●",
-    unstaged = "○",
-    untracked = "?",
-    conflict = "!",
-    renamed = "→",
-    deleted = "×",
-  },
   mappings = {
-    close = "q",
-    refresh = "r",
-    next_item = "j",
-    prev_item = "k",
-    select = "<CR>",
-    next_panel = "<Tab>",
-    prev_panel = "<S-Tab>",
-    focus_status = "1",
-    focus_branches = "2",
-    focus_commits = "3",
-    focus_stashes = "4",
-    status_view = "gs",
-    commit_view = "gl",
-    branch_view = "gb",
-    stash_view = "gz",
-    next_file = false,
-    prev_file = false,
-    next_hunk = "]c",
-    prev_hunk = "[c",
-    next_diff_file = "]f",
-    prev_diff_file = "[f",
-    toggle_diff = "dv",
-    stage = "s",
-    unstage = "u",
-    discard = "X",
-    open_file = "o",
-    focus_files = "<leader>e",
-    focus_preview = "<leader>d",
-    filter = "/",
-    help = "?",
-    primary_action = "x",
-    new_item = "n",
-    delete_item = "D",
-    apply_item = "a",
-    pop_item = "p",
-    commit = "c",
-    amend = "C",
-    load_more = "L",
-    fetch = "f",
-    pull = "U",
-    push = "P",
-    choose_ours = "co",
-    choose_theirs = "ct",
-    continue_operation = "gC",
-    abort_operation = "gA",
-    merge = "m",
-    rebase = "R",
-    cherry_pick = "v",
+    toggle_diff = "dv", -- set any mapping to false to disable it
   },
 })
 ```
+
+The example shows the main layout and resource controls. Defaults work without
+calling `setup()`; see `:help ngit-configure` for every option and the table
+above for all default mappings.
 
 `dashboard` is the only rendered layout. The former `vertical`, `stacked`, and
 `auto` values remain accepted as compatibility aliases and normalize to the
@@ -251,8 +199,10 @@ Automatic refresh is event-aware. Saving a buffer reloads working-tree status
 and its preview only; focus and shell events perform a full repository refresh.
 This keeps commit, branch, and stash history queries off the common save path.
 
-Set any mapping to `false` to disable it. Configuration is validated when
-`setup()` is called.
+The preview cache is bounded independently by entry count and estimated memory.
+An item larger than `max_cache_bytes` is displayed but not retained. Set any
+mapping to `false` to disable it. Configuration is validated when `setup()` is
+called.
 
 ## Commands
 
@@ -263,10 +213,6 @@ Set any mapping to `false` to disable it. Configuration is validated when
 - `:NGitBranches` — open ngit and focus Branches.
 - `:NGitStashes` — open ngit and focus Stashes.
 - `:checkhealth ngit` — check Neovim, Git, and configuration.
-
-For contributors, `make check` runs the test suite, startup/help smoke checks,
-and Git whitespace validation. `make format-check` verifies Lua formatting
-when StyLua is installed, and CI runs both.
 
 ## Safety
 
@@ -286,27 +232,47 @@ The four dashboard collections load independently and asynchronously. File and
 object patches are loaded only for the active selection; changing panel focus
 does not reload collection data. Rapid selections are debounced, superseded
 jobs are terminated, and cached patches are bounded by `cache_entries`. Large
-previews are truncated at `max_diff_bytes`. Each raw patch is parsed once into
-the presentation model; switching split/unified views does not invoke Git
-again.
+previews are truncated at `max_diff_bytes`. Cached previews are also bounded by
+`max_cache_bytes`, so a handful of large patches cannot exhaust the intended
+cache budget. Each raw patch is parsed once into the presentation model;
+switching split/unified views does not invoke Git again.
 
-Run the included parser benchmark:
+The included deterministic microbenchmark uses generated fixtures, warm-up
+runs, and the median of seven timed samples:
 
 ```sh
 make benchmark
 ```
 
+Representative results from an Apple M4 with 24 GB RAM, Neovim 0.12.4, on
+2026-07-25:
+
+| Workload | Fixture | Median |
+| --- | ---: | ---: |
+| Porcelain-v2 status parser | 10,000 files | 13.235 ms |
+| Commit parser | 10,000 commits | 36.924 ms |
+| Branch parser | 10,000 refs | 25.767 ms |
+| Diff presentation | 4 KiB near-identical lines | 0.750 ms |
+
+These numbers measure in-process parsing and diff-model construction, not Git
+process startup, disk I/O, or screen rendering. They are reference points for
+regression checks rather than performance guarantees; run `make benchmark` on
+your own machine when comparing changes.
+
 ## Development
 
 ```sh
-make test
+make check
+make format-check
 make benchmark
 ```
 
 Tests use temporary real Git repositories and a headless Neovim instance. They
 cover parsing, caching, diff extraction, file and hunk staging, commits,
 branches, stashes, local remote synchronization, merge-conflict resolution,
-and multi-panel dashboard rendering.
+and multi-panel dashboard rendering. `make check` also runs startup/help smoke
+checks and Git whitespace validation. CI runs both `make check` and
+`make format-check`.
 
 ## License
 

@@ -1,4 +1,5 @@
 local M = {}
+local owned_derived = {}
 
 local linked_definitions = {
   NgitHeader = { link = "Title" },
@@ -48,9 +49,14 @@ local function derived_definitions()
   local red = color("DiagnosticError", "fg", color("DiffDelete", "fg", 0xff5f67))
   local green = color("DiagnosticOk", "fg", color("DiffAdd", "fg", 0x55d66b))
   local yellow = color("DiagnosticWarn", "fg", color("DiffChange", "fg", 0xe5b95c))
+  local blue = color("DiagnosticInfo", "fg", 0x61afef)
   local line_amount = vim.o.background == "light" and 0.2 or 0.3
   local text_amount = vim.o.background == "light" and 0.38 or 0.52
   return {
+    NgitStagedSign = { fg = green, bold = true },
+    NgitUnstagedSign = { fg = yellow, bold = true },
+    NgitUntrackedSign = { fg = blue, bold = true },
+    NgitConflictSign = { fg = red, bold = true },
     NgitDiffAdd = { bg = blend(background, green, line_amount) },
     NgitDiffDelete = { bg = blend(background, red, line_amount) },
     NgitDiffChange = { bg = blend(background, yellow, line_amount) },
@@ -70,12 +76,38 @@ local function derived_definitions()
   }
 end
 
+local function matches(highlight, spec)
+  for _, key in ipairs({ "fg", "bg", "sp", "bold", "italic", "underline" }) do
+    if highlight[key] ~= spec[key] and not (highlight[key] == nil and spec[key] == false) then
+      return false
+    end
+  end
+  return true
+end
+
+local function highlight(name)
+  local ok, value = pcall(vim.api.nvim_get_hl, 0, { name = name, link = false })
+  return ok and value or {}
+end
+
 local function apply()
   for name, spec in pairs(linked_definitions) do
     vim.api.nvim_set_hl(0, name, vim.tbl_extend("force", { default = true }, spec))
   end
   for name, spec in pairs(derived_definitions()) do
-    vim.api.nvim_set_hl(0, name, vim.tbl_extend("force", { default = true }, spec))
+    local current = highlight(name)
+    local owned = owned_derived[name]
+    if owned and (vim.tbl_isempty(current) or matches(current, owned)) then
+      vim.api.nvim_set_hl(0, name, spec)
+      owned_derived[name] = spec
+    elseif not owned then
+      vim.api.nvim_set_hl(0, name, vim.tbl_extend("force", { default = true }, spec))
+      if matches(highlight(name), spec) then
+        owned_derived[name] = spec
+      end
+    else
+      owned_derived[name] = nil
+    end
   end
 end
 

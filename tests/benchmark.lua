@@ -1,28 +1,69 @@
+local branch = require("ngit.git.branch")
+local diff = require("ngit.git.diff")
+local diff_view = require("ngit.ui.diff_view")
+local log = require("ngit.git.log")
 local status = require("ngit.git.status")
 
-local records = {
+local sample_count = 7
+
+local function output(message)
+  vim.api.nvim_out_write(message .. "\n")
+end
+
+local function benchmark(label, iterations, warmups, run)
+  for _ = 1, warmups do
+    run()
+  end
+
+  local samples = {}
+  for sample = 1, sample_count do
+    collectgarbage("collect")
+    local started = vim.uv.hrtime()
+    for _ = 1, iterations do
+      run()
+    end
+    samples[sample] = (vim.uv.hrtime() - started) / 1e6 / iterations
+  end
+  table.sort(samples)
+
+  local median = samples[math.ceil(sample_count / 2)]
+  output(
+    ("%s: %.3f ms/run median (%.3f–%.3f, %d samples)"):format(
+      label,
+      median,
+      samples[1],
+      samples[#samples],
+      sample_count
+    )
+  )
+end
+
+local version = vim.version()
+output(
+  ("environment: Neovim %d.%d.%d, %s/%s"):format(
+    version.major,
+    version.minor,
+    version.patch,
+    jit and jit.os or "unknown OS",
+    jit and jit.arch or "unknown arch"
+  )
+)
+
+local status_records = {
   "# branch.oid abcdef",
   "# branch.head benchmark",
   "# branch.ab +12 -3",
 }
 for index = 1, 10000 do
-  records[#records + 1] = ("1 .M N... 100644 100644 100644 abc def src/file-%05d.lua"):format(index)
+  status_records[#status_records + 1] = ("1 .M N... 100644 100644 100644 abc def src/file-%05d.lua"):format(
+    index
+  )
 end
-records[#records + 1] = ""
-local fixture = table.concat(records, "\0")
-
-for _ = 1, 5 do
-  status.parse(fixture)
-end
-
-local started = vim.uv.hrtime()
-for _ = 1, 50 do
-  local parsed = status.parse(fixture)
-  assert(#parsed.files == 10000)
-end
-local elapsed_ms = (vim.uv.hrtime() - started) / 1e6
-
-print(("porcelain parser: %.2f ms/run (10,000 files)"):format(elapsed_ms / 50))
+status_records[#status_records + 1] = ""
+local status_fixture = table.concat(status_records, "\0")
+benchmark("porcelain parser (10,000 files)", 10, 2, function()
+  assert(#status.parse(status_fixture).files == 10000)
+end)
 
 local commit_records = {}
 for index = 1, 10000 do
@@ -38,12 +79,9 @@ for index = 1, 10000 do
   }, "\0")
 end
 local commit_fixture = table.concat(commit_records, "\n")
-local commit_started = vim.uv.hrtime()
-for _ = 1, 20 do
-  assert(#require("ngit.git.log").parse(commit_fixture) == 10000)
-end
-local commit_ms = (vim.uv.hrtime() - commit_started) / 1e6
-print(("commit parser: %.2f ms/run (10,000 commits)"):format(commit_ms / 20))
+benchmark("commit parser (10,000 commits)", 4, 1, function()
+  assert(#log.parse(commit_fixture) == 10000)
+end)
 
 local branch_records = {}
 for index = 1, 10000 do
@@ -60,12 +98,9 @@ for index = 1, 10000 do
   }, "\0")
 end
 local branch_fixture = table.concat(branch_records, "\n")
-local branch_started = vim.uv.hrtime()
-for _ = 1, 20 do
-  assert(#require("ngit.git.branch").parse(branch_fixture) == 10000)
-end
-local branch_ms = (vim.uv.hrtime() - branch_started) / 1e6
-print(("branch parser: %.2f ms/run (10,000 refs)"):format(branch_ms / 20))
+benchmark("branch parser (10,000 refs)", 4, 1, function()
+  assert(#branch.parse(branch_fixture) == 10000)
+end)
 
 local repeated = string.rep("a", 3998)
 local diff_fixture = table.concat({
@@ -77,15 +112,11 @@ local diff_fixture = table.concat({
   "+" .. repeated .. "y",
   "",
 }, "\n")
-local parsed_diff = require("ngit.git.diff").parse(diff_fixture, #diff_fixture + 1)
-local diff_view = require("ngit.ui.diff_view")
-local diff_started = vim.uv.hrtime()
-for _ = 1, 500 do
+local parsed_diff = diff.parse(diff_fixture, #diff_fixture + 1)
+benchmark("diff presentation (4 KiB near-identical lines)", 100, 2, function()
   local split = diff_view.split(parsed_diff, { title = "long line" })
   assert(#split.left.lines > 0)
   assert(#diff_view.unified(parsed_diff, { title = "long line" }, split).unified.lines > 0)
-end
-local diff_ms = (vim.uv.hrtime() - diff_started) / 1e6
-print(("diff presentation: %.3f ms/run (4 KiB near-identical lines)"):format(diff_ms / 500))
+end)
 
 vim.cmd("qa!")

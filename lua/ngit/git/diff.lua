@@ -9,6 +9,7 @@ local M = {}
 ---@field files table[]
 ---@field metadata table
 ---@field truncated boolean
+---@field estimated_bytes integer
 
 local function lines_and_hunks(text)
   local lines = vim.split(text, "\n", { plain = true })
@@ -256,6 +257,27 @@ local function structured_diff(lines)
   return files, metadata
 end
 
+local function estimated_bytes(text, lines, files)
+  local total = #text
+  for _, line in ipairs(lines) do
+    total = total + #line
+  end
+  for _, file in ipairs(files) do
+    total = total + #(file.old_path or "") + #(file.new_path or "") + #(file.display_path or "")
+    for _, value in ipairs(file.metadata or {}) do
+      total = total + #value
+    end
+    for _, hunk in ipairs(file.hunks or {}) do
+      total = total + #(hunk.heading or "")
+      for _, pair in ipairs(hunk.rows or {}) do
+        total = total + #(pair.left and pair.left.text or "")
+        total = total + #(pair.right and pair.right.text or "")
+      end
+    end
+  end
+  return total
+end
+
 ---@param text string
 ---@param max_bytes integer
 ---@param forced_truncation? boolean
@@ -279,6 +301,7 @@ function M.parse(text, max_bytes, forced_truncation)
     files = files,
     metadata = metadata,
     truncated = truncated,
+    estimated_bytes = estimated_bytes(text, lines, files),
   }
 end
 

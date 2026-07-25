@@ -278,8 +278,16 @@ test("configuration rejects unsafe resource limits", function()
   require("ngit").setup()
 end)
 
+test("configuration validates the preview cache byte budget", function()
+  local ok, err = pcall(require("ngit").setup, { max_cache_bytes = 100 })
+  equal(false, ok)
+  truthy(tostring(err):find("max_cache_bytes", 1, true))
+  require("ngit").setup()
+end)
+
 test("diff highlights provide visible theme-derived backgrounds", function()
-  require("ngit.ui.highlights").setup()
+  local highlights = require("ngit.ui.highlights")
+  highlights.setup()
   local add = vim.api.nvim_get_hl(0, { name = "NgitDiffAdd", link = false })
   local delete = vim.api.nvim_get_hl(0, { name = "NgitDiffDelete", link = false })
   local add_text = vim.api.nvim_get_hl(0, { name = "NgitDiffAddText", link = false })
@@ -291,6 +299,27 @@ test("diff highlights provide visible theme-derived backgrounds", function()
   truthy(add.bg ~= delete.bg)
   truthy(add_text.bg ~= add.bg)
   truthy(delete_text.bg ~= delete.bg)
+  for _, name in ipairs({
+    "NgitStagedSign",
+    "NgitUnstagedSign",
+    "NgitUntrackedSign",
+    "NgitConflictSign",
+  }) do
+    equal(nil, vim.api.nvim_get_hl(0, { name = name, link = false }).bg)
+  end
+
+  local normal = vim.api.nvim_get_hl(0, { name = "Normal", link = false })
+  local changed_background = normal.bg == 0xfefefe and 0x010101 or 0xfefefe
+  vim.api.nvim_set_hl(0, "Normal", vim.tbl_extend("force", normal, { bg = changed_background }))
+  vim.api.nvim_exec_autocmds("ColorScheme", {})
+  local recolored = vim.api.nvim_get_hl(0, { name = "NgitDiffAdd", link = false })
+  truthy(recolored.bg ~= add.bg)
+
+  vim.api.nvim_set_hl(0, "NgitDiffAdd", { bg = 0x123456 })
+  vim.api.nvim_set_hl(0, "Normal", normal)
+  vim.api.nvim_exec_autocmds("ColorScheme", {})
+  equal(0x123456, vim.api.nvim_get_hl(0, { name = "NgitDiffAdd", link = false }).bg)
+  vim.api.nvim_set_hl(0, "NgitDiffAdd", recolored)
 end)
 
 test("dashboard is the default layout with configurable panel navigation", function()
@@ -347,6 +376,26 @@ test("LRU evicts the least recently used value", function()
   equal(nil, cache:get("b"))
   equal(1, cache:get("a"))
   equal(3, cache:get("c"))
+end)
+
+test("LRU also evicts by total value weight", function()
+  local cache = require("ngit.util.lru").new(10, {
+    max_weight = 5,
+    weigh = function(value)
+      return #value
+    end,
+  })
+  equal(true, cache:set("a", "123"))
+  equal(true, cache:set("b", "45"))
+  equal(5, cache.total_weight)
+  cache:get("a")
+  equal(true, cache:set("c", "x"))
+  equal(nil, cache:get("b"))
+  equal("123", cache:get("a"))
+  equal("x", cache:get("c"))
+  equal(false, cache:set("huge", "123456"))
+  equal(nil, cache:get("huge"))
+  truthy(cache.total_weight <= cache.max_weight)
 end)
 
 test("commit, branch, and stash backends parse a real repository", function()
@@ -520,14 +569,36 @@ end)
 
 test("streaming console appends output and cleans up its window", function()
   local console = require("ngit.ui.console").new("test operation")
-  console:append("first\nsecond\n")
+  console:append("fir")
+  console:append("st\nsecond")
+  console:append("\n")
+  console:append("third\r")
+  console:append("\nfourth\r")
+  console:append(" line\n")
   console:finish(true, 0)
-  local contents = table.concat(vim.api.nvim_buf_get_lines(console.buffer, 0, -1, false), "\n")
+  local lines = vim.api.nvim_buf_get_lines(console.buffer, 0, -1, false)
+  local contents = table.concat(lines, "\n")
   truthy(contents:find("first", 1, true))
+  truthy(not vim.tbl_contains(lines, "fir"))
+  truthy(not vim.tbl_contains(lines, "st"))
+  truthy(vim.tbl_contains(lines, "third"))
+  truthy(vim.tbl_contains(lines, "fourth"))
+  truthy(vim.tbl_contains(lines, " line"))
   truthy(contents:find("Completed successfully.", 1, true))
   local window = console.window
   console:close()
   equal(false, vim.api.nvim_win_is_valid(window))
+end)
+
+test("streaming console keeps bounded output without repeated front removal", function()
+  local console = require("ngit.ui.console").new("bounded operation")
+  console.max_lines = 3
+  console:append("one\ntwo\nthree\nfour\n")
+  console:finish(true, 0)
+  local lines = vim.api.nvim_buf_get_lines(console.buffer, 0, -1, false)
+  equal({ "four", "", "Completed successfully." }, lines)
+  equal(3, console.line_count)
+  console:close()
 end)
 
 test("remote backend streams local fetch, pull, and push operations", function()
@@ -1030,6 +1101,10 @@ test("dashboard uses unified preview at a narrow usable size", function()
   local dashboard = require("ngit.ui.dashboard").open(99998, require("ngit.config").defaults())
   equal("unified", dashboard.preview.layout)
   truthy(vim.api.nvim_win_is_valid(dashboard.preview.unified.window))
+  equal(false, dashboard:supports_side_by_side())
+  equal("unified", dashboard:set_preview_layout("side_by_side"))
+  equal("unified", dashboard.preview.layout)
+  equal(nil, dashboard.preview.left.window)
   local tab = dashboard.tab
   dashboard:dispose()
   if vim.api.nvim_tabpage_is_valid(tab) then

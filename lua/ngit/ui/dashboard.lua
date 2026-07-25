@@ -368,12 +368,20 @@ local function render_source(self, target, model, filetype)
   end
 end
 
-function Dashboard:desired_preview_layout()
-  local width = valid_window(self.preview.header.window)
+function Dashboard:preview_width()
+  return valid_window(self.preview.header.window)
       and vim.api.nvim_win_get_width(self.preview.header.window)
     or vim.o.columns
+end
+
+function Dashboard:supports_side_by_side()
+  return self:preview_width() >= 40
+end
+
+function Dashboard:desired_preview_layout()
+  local width = self:preview_width()
   if self.config.diff_layout == "side_by_side" then
-    return width >= 40 and "side_by_side" or "unified"
+    return self:supports_side_by_side() and "side_by_side" or "unified"
   elseif self.config.diff_layout == "unified" then
     return "unified"
   end
@@ -381,8 +389,11 @@ function Dashboard:desired_preview_layout()
 end
 
 function Dashboard:set_preview_layout(layout)
+  if layout == "side_by_side" and not self:supports_side_by_side() then
+    layout = "unified"
+  end
   if layout == self.preview.layout then
-    return
+    return layout
   end
   local origin = vim.api.nvim_get_current_win()
   if layout == "unified" then
@@ -415,11 +426,12 @@ function Dashboard:set_preview_layout(layout)
   if valid_window(origin) then
     vim.api.nvim_set_current_win(origin)
   end
+  return layout
 end
 
 function Dashboard:render_diff(models, layout, filetype)
   layout = layout or self:desired_preview_layout()
-  self:set_preview_layout(layout)
+  layout = self:set_preview_layout(layout)
   local active = layout == "side_by_side" and models.split or models.unified
   local header = active and active.header or { "Diff" }
   local width = valid_window(self.preview.header.window)
@@ -448,6 +460,7 @@ function Dashboard:render_diff(models, layout, filetype)
   else
     pcall(vim.api.nvim_win_set_cursor, self.preview.unified.window, { 1, 0 })
   end
+  return layout
 end
 
 function Dashboard:preview_windows()
