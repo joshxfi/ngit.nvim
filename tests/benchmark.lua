@@ -119,4 +119,51 @@ benchmark("diff presentation (4 KiB near-identical lines)", 100, 2, function()
   assert(#diff_view.unified(parsed_diff, { title = "long line" }, split).unified.lines > 0)
 end)
 
+-- A patch large enough for presentation and drawing to dominate. The fixture
+-- above is one very long line, which exercises intraline diffing but says
+-- nothing about how a realistically sized patch reaches the screen.
+local patch_records = {
+  "diff --git a/big.lua b/big.lua",
+  "index 1111111..2222222 100644",
+  "--- a/big.lua",
+  "+++ b/big.lua",
+  "@@ -1,4000 +1,4000 @@",
+}
+for index = 1, 4000 do
+  if index % 2 == 1 then
+    patch_records[#patch_records + 1] = ("-local value_%04d = 'before'"):format(index)
+    patch_records[#patch_records + 1] = ("+local value_%04d = 'after'"):format(index)
+  else
+    patch_records[#patch_records + 1] = (" local stable_%04d = true"):format(index)
+  end
+end
+patch_records[#patch_records + 1] = ""
+local large_patch = table.concat(patch_records, "\n")
+local parsed_patch = diff.parse(large_patch, #large_patch + 1)
+
+benchmark("diff presentation (4,000-line patch)", 5, 1, function()
+  local split = diff_view.split(parsed_patch, { title = "big.lua" })
+  assert(#diff_view.unified(parsed_patch, { title = "big.lua" }, split).unified.lines > 0)
+end)
+
+-- Drawing the model into buffers: line population, highlight extmarks, and the
+-- source-number gutter. This is the cost paid on every selection change.
+vim.o.columns = 160
+vim.o.lines = 44
+-- Opening the dashboard switches tab pages, which swallows a pending newline.
+output("")
+local dashboard = require("ngit.ui.dashboard").open(0, require("ngit.config").defaults())
+local patch_split = diff_view.split(parsed_patch, { title = "big.lua" })
+local patch_models = {
+  split = patch_split,
+  unified = diff_view.unified(parsed_patch, { title = "big.lua" }, patch_split),
+}
+benchmark("preview render (4,000-line patch, unified)", 5, 1, function()
+  dashboard:render_diff(patch_models, "unified", nil)
+end)
+benchmark("preview render (4,000-line patch, side by side)", 5, 1, function()
+  dashboard:render_diff(patch_models, "side_by_side", nil)
+end)
+dashboard:dispose()
+
 vim.cmd("qa!")

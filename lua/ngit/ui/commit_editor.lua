@@ -34,18 +34,32 @@ local function trim_message(lines)
 end
 
 ---@param root string
----@param opts { amend: boolean, message?: string, on_complete: fun() }
+---@param opts { amend: boolean, message?: string, staged?: integer, branch?: string, on_complete: fun() }
 function CommitEditor.new(root, opts)
   next_id = next_id + 1
   local self = setmetatable({
     root = root,
     amend = opts.amend,
+    staged = opts.staged,
+    branch = opts.branch,
     on_complete = opts.on_complete,
     submitting = false,
     closed = false,
   }, CommitEditor)
   self:open(opts.message or "")
   return self
+end
+
+--- Names what is about to be recorded, so the editor is not a bare text box.
+function CommitEditor:title()
+  local parts = { self.amend and "Amend" or "Commit" }
+  if self.branch and self.branch ~= "" then
+    parts[#parts + 1] = "on " .. self.branch
+  end
+  if self.staged and self.staged > 0 then
+    parts[#parts + 1] = ("· %d file%s"):format(self.staged, self.staged == 1 and "" or "s")
+  end
+  return (" %s  —  <C-s> submit, q abort "):format(table.concat(parts, " "))
 end
 
 function CommitEditor:open(message)
@@ -63,22 +77,26 @@ function CommitEditor:open(message)
   vim.api.nvim_buf_set_lines(self.buffer, 0, -1, false, lines)
   vim.bo[self.buffer].modified = false
 
-  local width = math.min(math.max(42, math.floor(vim.o.columns * 0.46)), vim.o.columns - 4)
-  local height = math.min(math.max(10, math.floor(vim.o.lines * 0.42)), vim.o.lines - 4)
+  local width = math.min(math.max(48, math.floor(vim.o.columns * 0.46)), vim.o.columns - 4)
+  local height = math.min(math.max(10, math.floor(vim.o.lines * 0.35)), vim.o.lines - 4)
   self.window = vim.api.nvim_open_win(self.buffer, true, {
     relative = "editor",
-    row = 1,
-    col = 2,
+    row = math.max(0, math.floor((vim.o.lines - height) / 2) - 2),
+    col = math.max(0, math.floor((vim.o.columns - width) / 2)),
     width = width,
     height = height,
     style = "minimal",
     border = "rounded",
-    title = self.amend and " Amend commit · :w to submit " or " Commit · :w to submit ",
+    title = self:title(),
     title_pos = "center",
   })
   vim.wo[self.window].wrap = true
+  vim.wo[self.window].linebreak = true
   vim.wo[self.window].number = false
   vim.wo[self.window].signcolumn = "no"
+  vim.wo[self.window].winhighlight = "FloatBorder:NgitMuted"
+  -- The conventional 50/72 guides make the subject/body split visible.
+  vim.wo[self.window].colorcolumn = "50,72"
 
   self.augroup = vim.api.nvim_create_augroup(("ngit_commit_%d"):format(next_id), { clear = true })
   vim.api.nvim_create_autocmd("BufWriteCmd", {

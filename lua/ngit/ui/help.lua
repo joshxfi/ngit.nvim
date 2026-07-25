@@ -2,63 +2,232 @@ local actions = require("ngit.ui.actions")
 
 local M = {}
 
-local navigation = {
-  { "focus_status", "Focus changes" },
-  { "focus_branches", "Focus branches" },
-  { "focus_commits", "Focus commits" },
-  { "focus_stashes", "Focus stashes" },
-  { "next_panel", "Next panel" },
-  { "prev_panel", "Previous panel" },
-  { "next_item", "Next item" },
-  { "prev_item", "Previous item" },
-  { "select", "Focus preview" },
-  { "focus_files", "Return to active panel" },
-  { "focus_preview", "Focus preview" },
-  { "next_hunk", "Next hunk" },
-  { "prev_hunk", "Previous hunk" },
-  { "next_diff_file", "Next changed file" },
-  { "prev_diff_file", "Previous changed file" },
-  { "toggle_diff", "Toggle split/unified diff" },
+--- Presentation order for the key sheet. Actions that are not listed here are
+--- appended under "Other" so a newly registered action can never go missing.
+local groups = {
+  {
+    title = "Panels",
+    items = {
+      { "focus_status", "Changes" },
+      { "focus_branches", "Branches" },
+      { "focus_commits", "Commits" },
+      { "focus_stashes", "Stashes" },
+      { "next_panel", "Next panel" },
+      { "prev_panel", "Previous panel" },
+      { "filter", "Filter panel" },
+    },
+  },
+  {
+    title = "Movement",
+    items = {
+      { "next_item", "Next item" },
+      { "prev_item", "Previous item" },
+      { "select", "Focus preview" },
+      { "focus_preview", "Focus preview" },
+      { "focus_files", "Back to panel" },
+      { "next_hunk", "Next hunk" },
+      { "prev_hunk", "Previous hunk" },
+      { "next_diff_file", "Next changed file" },
+      { "prev_diff_file", "Previous changed file" },
+      { "toggle_diff", "Split / unified diff" },
+    },
+  },
+  {
+    title = "Changes",
+    items = {
+      { "stage", "Stage file or hunk" },
+      { "unstage", "Unstage file or hunk" },
+      { "stage_all", "Stage everything" },
+      { "unstage_all", "Unstage everything" },
+      { "discard", "Discard changes" },
+      { "open_file", "Open in editor" },
+      { "commit", "Commit" },
+      { "amend", "Amend last commit" },
+    },
+  },
+  {
+    title = "Branches and history",
+    items = {
+      { "primary_action", "Check out / copy SHA" },
+      { "new_item", "New branch or stash" },
+      { "delete_item", "Delete or drop" },
+      { "merge", "Merge branch" },
+      { "rebase", "Rebase onto branch" },
+      { "cherry_pick", "Cherry-pick commit" },
+      { "load_more", "Load more commits" },
+      { "apply_item", "Apply stash" },
+      { "pop_item", "Pop stash" },
+    },
+  },
+  {
+    title = "Conflicts and remotes",
+    items = {
+      { "choose_ours", "Take ours" },
+      { "choose_theirs", "Take theirs" },
+      { "continue_operation", "Continue operation" },
+      { "abort_operation", "Abort operation" },
+      { "fetch", "Fetch" },
+      { "pull", "Pull (fast-forward)" },
+      { "push", "Push" },
+    },
+  },
+  {
+    title = "Session",
+    items = {
+      { "refresh", "Refresh" },
+      { "help", "This help" },
+      { "close", "Close ngit" },
+    },
+  },
 }
 
-function M.lines(mappings)
-  local items = {}
-  local seen = {}
-  local function add(mapping, label)
-    local key = mappings[mapping]
-    if key and key ~= false and key ~= "" then
-      local identity = key .. "\0" .. label
-      if not seen[identity] then
-        seen[identity] = true
-        items[#items + 1] = { key = key, label = label }
+local function grouped(mappings)
+  local listed = {}
+  local result = {}
+  for _, group in ipairs(groups) do
+    local items = {}
+    for _, item in ipairs(group.items) do
+      local key = mappings[item[1]]
+      if key and key ~= false and key ~= "" then
+        listed[item[1]] = true
+        items[#items + 1] = { key = key, label = item[2] }
       end
     end
-  end
-  for _, item in ipairs(navigation) do
-    add(item[1], item[2])
-  end
-  for _, item in ipairs(actions.help_items(mappings)) do
-    local identity = item.key .. "\0" .. item.label
-    if not seen[identity] then
-      seen[identity] = true
-      items[#items + 1] = item
+    if #items > 0 then
+      result[#result + 1] = { title = group.title, items = items }
     end
   end
 
+  local extra = {}
+  for _, action in ipairs(actions.definitions()) do
+    local key = mappings[action.mapping]
+    if not listed[action.mapping] and key and key ~= false and key ~= "" then
+      listed[action.mapping] = true
+      extra[#extra + 1] = { key = key, label = action.label }
+    end
+  end
+  if #extra > 0 then
+    result[#result + 1] = { title = "Other", items = extra }
+  end
+  return result
+end
+
+local function key_width(sections)
   local width = vim.fn.strdisplaywidth("<Esc>")
-  for _, item in ipairs(items) do
-    width = math.max(width, vim.fn.strdisplaywidth(item.key))
+  for _, section in ipairs(sections) do
+    for _, item in ipairs(section.items) do
+      width = math.max(width, vim.fn.strdisplaywidth(item.key))
+    end
   end
-  local lines = { "ngit mappings", "" }
-  for _, item in ipairs(items) do
-    lines[#lines + 1] = ("%s%s  %s"):format(
-      item.key,
-      string.rep(" ", width - vim.fn.strdisplaywidth(item.key)),
-      item.label
-    )
+  return width
+end
+
+--- Plain-text rendering, kept as the fallback for callers without a window.
+---@param mappings table
+---@return string[]
+function M.lines(mappings)
+  local sections = grouped(mappings)
+  local width = key_width(sections)
+  local lines = { "ngit mappings" }
+  for _, section in ipairs(sections) do
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = section.title
+    for _, item in ipairs(section.items) do
+      lines[#lines + 1] = ("  %s%s  %s"):format(
+        item.key,
+        string.rep(" ", width - vim.fn.strdisplaywidth(item.key)),
+        item.label
+      )
+    end
   end
-  lines[#lines + 1] = ("%-" .. width .. "s  %s"):format("<Esc>", "Return to active panel")
+  lines[#lines + 1] = ""
+  lines[#lines + 1] = ("  %-" .. width .. "s  %s"):format("<Esc>", "Return to active panel")
   return lines
+end
+
+--- Builds the float's buffer content together with the spans that colour it.
+local function render(mappings)
+  local sections = grouped(mappings)
+  local width = key_width(sections)
+  local lines, highlights = {}, {}
+  local text_width = 0
+
+  local function push(text, spans)
+    lines[#lines + 1] = text
+    text_width = math.max(text_width, vim.fn.strdisplaywidth(text))
+    for _, span in ipairs(spans or {}) do
+      span.row = #lines - 1
+      highlights[#highlights + 1] = span
+    end
+  end
+
+  for index, section in ipairs(sections) do
+    if index > 1 then
+      push("")
+    end
+    push("  " .. section.title, { { col = 2, end_col = 2 + #section.title, group = "NgitHeader" } })
+    for _, item in ipairs(section.items) do
+      local padding = string.rep(" ", width - vim.fn.strdisplaywidth(item.key))
+      local text = ("   %s%s   %s"):format(item.key, padding, item.label)
+      push(text, {
+        { col = 3, end_col = 3 + #item.key, group = "NgitActionKey" },
+        { col = #text - #item.label, end_col = #text, group = "NgitActionLabel" },
+      })
+    end
+  end
+  return lines, highlights, text_width
+end
+
+--- Opens the key sheet as a float. Returns the window so a caller can close it.
+---@param mappings table
+---@return integer? window
+function M.open(mappings)
+  local lines, highlights, text_width = render(mappings)
+  local buffer = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_lines(buffer, 0, -1, false, lines)
+  vim.bo[buffer].modifiable = false
+  vim.bo[buffer].bufhidden = "wipe"
+  vim.bo[buffer].filetype = "ngit-help"
+
+  local namespace = vim.api.nvim_create_namespace("ngit_help")
+  for _, span in ipairs(highlights) do
+    pcall(vim.api.nvim_buf_set_extmark, buffer, namespace, span.row, span.col, {
+      end_col = span.end_col,
+      hl_group = span.group,
+    })
+  end
+
+  local width = math.max(30, math.min(text_width + 4, vim.o.columns - 8))
+  local height = math.max(8, math.min(#lines, vim.o.lines - 8))
+  local window = vim.api.nvim_open_win(buffer, true, {
+    relative = "editor",
+    row = math.max(0, math.floor((vim.o.lines - height) / 2) - 1),
+    col = math.max(0, math.floor((vim.o.columns - width) / 2)),
+    width = width,
+    height = height,
+    style = "minimal",
+    border = "rounded",
+    title = " ngit · keys ",
+    title_pos = "center",
+  })
+  vim.wo[window].wrap = false
+  vim.wo[window].cursorline = true
+  vim.wo[window].winhighlight = "FloatBorder:NgitMuted"
+
+  local function close()
+    if vim.api.nvim_win_is_valid(window) then
+      vim.api.nvim_win_close(window, true)
+    end
+  end
+  for _, key in ipairs({ "q", "<Esc>", "?" }) do
+    vim.keymap.set("n", key, close, {
+      buffer = buffer,
+      nowait = true,
+      silent = true,
+      desc = "ngit: close help",
+    })
+  end
+  return window
 end
 
 return M

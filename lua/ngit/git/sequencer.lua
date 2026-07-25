@@ -15,22 +15,45 @@ local function exists(path, kind)
   return stat and stat.type == kind
 end
 
+local function scan(git_dir)
+  for _, marker in ipairs(markers) do
+    if exists(vim.fs.joinpath(git_dir, marker[2]), marker[3]) then
+      return marker[1]
+    end
+  end
+  return nil
+end
+
+-- A worktree's git directory is fixed for the life of that worktree, so the
+-- lookup runs once instead of spawning rev-parse on every refresh. Detection
+-- then costs a few stat calls and needs no subprocess at all.
+local git_dirs = {}
+
+---@param root string
+function M.forget(root)
+  git_dirs[root] = nil
+end
+
 ---@param root string
 ---@param callback fun(operation: string?, err: string?)
+---@return vim.SystemObj?
 function M.detect(root, callback)
+  local cached = git_dirs[root]
+  if cached then
+    local operation = scan(cached)
+    vim.schedule(function()
+      callback(operation, nil)
+    end)
+    return nil
+  end
   return runner.run({ "rev-parse", "--absolute-git-dir" }, { cwd = root }, function(result)
     if not runner.ok(result) then
       callback(nil, runner.error_message(result))
       return
     end
     local git_dir = vim.trim(result.stdout)
-    for _, marker in ipairs(markers) do
-      if exists(vim.fs.joinpath(git_dir, marker[2]), marker[3]) then
-        callback(marker[1], nil)
-        return
-      end
-    end
-    callback(nil, nil)
+    git_dirs[root] = git_dir
+    callback(scan(git_dir), nil)
   end)
 end
 

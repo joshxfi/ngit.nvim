@@ -1,3 +1,5 @@
+local Gutter = require("ngit.ui.gutter")
+
 local Dashboard = {}
 Dashboard.__index = Dashboard
 
@@ -43,12 +45,15 @@ local function escape_statusline(value)
   return (value or ""):gsub("%%", "%%%%"):gsub("[\r\n]", " ")
 end
 
+--- Returns the shortened text and the byte length of the original prefix it
+--- kept, so callers can clamp highlight spans without colouring the ellipsis.
+---@return string, integer
 local function truncate(value, width)
   if width <= 0 or vim.fn.strdisplaywidth(value) <= width then
-    return value
+    return value, #value
   end
   if width == 1 then
-    return "…"
+    return "…", 0
   end
   local result = ""
   local index = 0
@@ -60,13 +65,14 @@ local function truncate(value, width)
     result = next_value
     index = index + 1
   end
-  return result .. "…"
+  return result .. "…", #result
 end
 
 local function configure_panel(window)
   vim.wo[window].number = false
   vim.wo[window].relativenumber = false
   vim.wo[window].signcolumn = "no"
+  vim.wo[window].foldcolumn = "0"
   vim.wo[window].cursorline = true
   vim.wo[window].wrap = false
   vim.wo[window].winfixwidth = true
@@ -85,9 +91,11 @@ local function configure_preview(window, config)
   vim.wo[window].number = false
   vim.wo[window].relativenumber = false
   vim.wo[window].signcolumn = "no"
+  vim.wo[window].foldcolumn = "0"
   vim.wo[window].wrap = false
   vim.wo[window].scrollbind = true
   vim.wo[window].cursorbind = true
+  vim.wo[window].statuscolumn = Gutter.expression
   configure_ngit_window(window, config)
 end
 
@@ -258,16 +266,29 @@ function Dashboard:refresh_winbars()
   for _, id in ipairs(panel_order) do
     local panel = self.panels[id]
     if valid_window(panel.window) then
-      local group = id == self.active_panel and "NgitPanelActive" or "NgitMuted"
-      local position = panel.count > 0 and ("%d/%d"):format(panel.selected, panel.count) or "0"
-      local detail = panel.detail ~= "" and (" · " .. panel.detail) or ""
-      vim.wo[panel.window].winbar = ("%%#%s# [%d] %s %%#NgitMuted#%s%s "):format(
-        group,
+      local active = id == self.active_panel
+      local position = panel.count > 0 and ("%d/%d"):format(panel.selected, panel.count) or "—"
+      local detail = panel.detail ~= "" and ("  " .. panel.detail) or ""
+      local winbar = ("%%#%s#%s%%#%s#%d %s %%#%s#%s%%#NgitMuted#%s "):format(
+        active and "NgitPanelMarker" or "NgitPanelMarkerIdle",
+        active and "▊" or " ",
+        active and "NgitPanelActive" or "NgitMuted",
         panel.index,
         panel.title,
+        active and "NgitPanelCount" or "NgitMuted",
         position,
         escape_statusline(detail)
       )
+      -- Reassigning an unchanged winbar still forces a redraw of the window.
+      if panel.winbar ~= winbar then
+        panel.winbar = winbar
+        vim.wo[panel.window].winbar = winbar
+      end
+      local winhighlight = active and "" or "CursorLine:NgitCursorLineIdle"
+      if panel.winhighlight ~= winhighlight then
+        panel.winhighlight = winhighlight
+        vim.wo[panel.window].winhighlight = winhighlight
+      end
     end
   end
 end
@@ -317,6 +338,7 @@ function Dashboard:render_preview(lines, title, opts)
   }) do
     set_lines(target.buffer, lines)
     vim.api.nvim_buf_clear_namespace(target.buffer, self.namespace, 0, -1)
+    Gutter.detach(target.buffer)
     if vim.treesitter and vim.treesitter.stop then
       pcall(vim.treesitter.stop, target.buffer)
     end
@@ -332,39 +354,38 @@ function Dashboard:render_preview(lines, title, opts)
   end
 end
 
+--- Syntax-highlighting a very large patch costs more than it returns, and the
+--- parse runs on the main loop.
+local max_treesitter_lines = 6000
+
 local function render_source(self, target, model, filetype)
-  set_lines(target.buffer, model.lines or { "" })
+  local lines = model.lines or { "" }
+  set_lines(target.buffer, lines)
   vim.api.nvim_buf_clear_namespace(target.buffer, self.namespace, 0, -1)
+  Gutter.attach(target.buffer, model)
   vim.bo[target.buffer].filetype = filetype or "ngit-diff"
-  if filetype and vim.treesitter and vim.treesitter.start then
+  if vim.treesitter and vim.treesitter.stop then
+    pcall(vim.treesitter.stop, target.buffer)
+  end
+  if filetype and #lines <= max_treesitter_lines and vim.treesitter and vim.treesitter.start then
     pcall(vim.treesitter.start, target.buffer, filetype)
   end
-  for row, number in ipairs(model.source_numbers or {}) do
-    if number then
-      local kind = model.source_kinds and model.source_kinds[row]
-      local marker = kind == "add" and "+" or (kind == "delete" and "-" or "│")
-      local group = kind == "add" and "NgitDiffAddNumber"
-        or (kind == "delete" and "NgitDiffDeleteNumber" or "LineNr")
-      vim.api.nvim_buf_set_extmark(target.buffer, self.namespace, row - 1, 0, {
-        virt_text = { { ("%5d %s "):format(number, marker), group } },
-        virt_text_pos = "inline",
-        priority = 250,
+  local set_extmark = vim.api.nvim_buf_set_extmark
+  local buffer, namespace = target.buffer, self.namespace
+  for _, item in ipairs(model.highlights or {}) do
+    if item.line then
+      set_extmark(buffer, namespace, item.row, 0, {
+        line_hl_group = item.group,
+        priority = item.priority or 50,
+      })
+    else
+      set_extmark(buffer, namespace, item.row, item.col or 0, {
+        hl_group = item.group,
+        end_col = item.end_col,
+        priority = item.priority or 50,
+        hl_mode = "combine",
       })
     end
-  end
-  for _, item in ipairs(model.highlights or {}) do
-    local opts = {
-      hl_group = item.group,
-      priority = item.priority or 50,
-      hl_mode = "combine",
-    }
-    if item.line then
-      opts.line_hl_group = item.group
-      opts.hl_group = nil
-    else
-      opts.end_col = item.end_col
-    end
-    vim.api.nvim_buf_set_extmark(target.buffer, self.namespace, item.row, item.col or 0, opts)
   end
 end
 
@@ -408,6 +429,7 @@ function Dashboard:set_preview_layout(layout)
     self.preview.buffer = self.preview.unified.buffer
   else
     local body = self.preview.unified.window or self.preview.right.window
+    local total = vim.api.nvim_win_get_width(body)
     self.preview.right.window = body
     vim.api.nvim_win_set_buf(body, self.preview.right.buffer)
     configure_preview(body, self.config)
@@ -419,13 +441,16 @@ function Dashboard:set_preview_layout(layout)
     self.preview.unified.window = nil
     self.preview.window = self.preview.right.window
     self.preview.buffer = self.preview.right.buffer
-    vim.api.nvim_set_current_win(self.preview.right.window)
-    vim.cmd("wincmd =")
+    -- Balance only the two diff columns. `wincmd =` would reach the whole tab
+    -- and flatten the weighted panel heights on the left.
+    pcall(vim.api.nvim_win_set_width, self.preview.left.window, math.floor((total - 1) / 2))
   end
   self.preview.layout = layout
   if valid_window(origin) then
     vim.api.nvim_set_current_win(origin)
   end
+  self:resize_sidebar()
+  self:reflow()
   return layout
 end
 
@@ -504,26 +529,48 @@ function Dashboard:render_actions(items, detail, detail_group)
   if not valid_buffer(self.actions.buffer) then
     return
   end
-  local parts = {}
-  for _, item in ipairs(items or {}) do
-    parts[#parts + 1] = ("%s:%s"):format(item.key, item.label)
+  local line = " "
+  local spans = {}
+  for index, item in ipairs(items or {}) do
+    if index > 1 then
+      line = line .. "  "
+    end
+    spans[#spans + 1] = { col = #line, end_col = #line + #item.key, group = "NgitActionKey" }
+    line = line .. item.key .. " "
+    spans[#spans + 1] = { col = #line, end_col = #line + #item.label, group = "NgitActionLabel" }
+    line = line .. item.label
   end
-  local left = table.concat(parts, "  ")
+
+  local detail_start
+  if detail and detail ~= "" then
+    line = line .. "  ·  "
+    detail_start = #line
+    line = line .. detail
+  end
+
   local width = valid_window(self.actions.window)
       and vim.api.nvim_win_get_width(self.actions.window)
     or vim.o.columns
-  local suffix = detail and detail ~= "" and ("  ·  " .. detail) or ""
-  local line = truncate(left .. suffix, math.max(1, width - 1))
-  set_lines(self.actions.buffer, { line })
+  local truncated, visible = truncate(line, math.max(1, width - 1))
+  set_lines(self.actions.buffer, { truncated })
   vim.api.nvim_buf_clear_namespace(self.actions.buffer, self.namespace, 0, -1)
-  if detail and detail ~= "" and detail_group then
-    local start = line:find("·", 1, true)
-    if start then
-      vim.api.nvim_buf_set_extmark(self.actions.buffer, self.namespace, 0, start - 1, {
-        end_col = #line,
-        hl_group = detail_group,
+
+  -- Truncation only removes a suffix, so surviving spans keep their byte
+  -- offsets. Clamping to the retained prefix keeps the ellipsis uncoloured and
+  -- every column on a character boundary.
+  for _, span in ipairs(spans) do
+    if span.col < visible then
+      vim.api.nvim_buf_set_extmark(self.actions.buffer, self.namespace, 0, span.col, {
+        end_col = math.min(span.end_col, visible),
+        hl_group = span.group,
       })
     end
+  end
+  if detail_start and detail_group and detail_start < visible then
+    vim.api.nvim_buf_set_extmark(self.actions.buffer, self.namespace, 0, detail_start, {
+      end_col = visible,
+      hl_group = detail_group,
+    })
   end
 end
 
@@ -584,9 +631,13 @@ function Dashboard:reflow()
     end
   end
 
+  -- Resizing a window redraws it and fires WinScrolled, so a render pass that
+  -- lands on the same layout should not touch the windows at all.
   for index = 1, #panel_order - 1 do
     local panel = self.panels[panel_order[index]]
-    pcall(vim.api.nvim_win_set_height, panel.window, heights[panel.id])
+    if vim.api.nvim_win_get_height(panel.window) ~= heights[panel.id] then
+      pcall(vim.api.nvim_win_set_height, panel.window, heights[panel.id])
+    end
   end
 end
 
@@ -621,6 +672,7 @@ function Dashboard:dispose()
   end
   self.disposed = true
   for _, buffer in ipairs(self:all_buffers()) do
+    Gutter.detach(buffer)
     if valid_buffer(buffer) then
       pcall(vim.api.nvim_buf_delete, buffer, { force = true })
     end

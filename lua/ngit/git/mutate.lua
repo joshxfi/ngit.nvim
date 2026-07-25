@@ -12,18 +12,48 @@ local function done(callback)
   end
 end
 
----@param root string
----@param path string
----@param callback fun(ok: boolean, err: string?)
-function M.stage_file(root, path, callback)
-  return runner.run({ "add", "--", path }, { cwd = root, readonly = false }, done(callback))
+-- Renames occupy two index slots, so every path-scoped mutation has to name the
+-- old path as well or the untouched half is left behind as a phantom entry.
+local function with_paths(args, paths)
+  args[#args + 1] = "--"
+  for _, path in ipairs(paths) do
+    if path and path ~= "" then
+      args[#args + 1] = path
+    end
+  end
+  return args
 end
 
 ---@param root string
----@param path string
+---@param paths string[]
 ---@param callback fun(ok: boolean, err: string?)
-function M.unstage_file(root, path, callback)
-  return runner.run({ "reset", "--", path }, { cwd = root, readonly = false }, done(callback))
+function M.stage_file(root, paths, callback)
+  paths = type(paths) == "string" and { paths } or paths
+  return runner.run(with_paths({ "add" }, paths), { cwd = root, readonly = false }, done(callback))
+end
+
+---@param root string
+---@param paths string[]
+---@param callback fun(ok: boolean, err: string?)
+function M.unstage_file(root, paths, callback)
+  paths = type(paths) == "string" and { paths } or paths
+  return runner.run(
+    with_paths({ "reset", "--quiet" }, paths),
+    { cwd = root, readonly = false },
+    done(callback)
+  )
+end
+
+---@param root string
+---@param callback fun(ok: boolean, err: string?)
+function M.stage_all(root, callback)
+  return runner.run({ "add", "--all", "--", "." }, { cwd = root, readonly = false }, done(callback))
+end
+
+---@param root string
+---@param callback fun(ok: boolean, err: string?)
+function M.unstage_all(root, callback)
+  return runner.run({ "reset", "--quiet", "--" }, { cwd = root, readonly = false }, done(callback))
 end
 
 ---@param root string
@@ -40,11 +70,37 @@ function M.apply_cached(root, patch, reverse, callback)
 end
 
 ---@param root string
+---@param paths string[]
+---@param callback fun(ok: boolean, err: string?)
+function M.discard_file(root, paths, callback)
+  paths = type(paths) == "string" and { paths } or paths
+  return runner.run(
+    with_paths({ "restore", "--worktree" }, paths),
+    { cwd = root, readonly = false },
+    done(callback)
+  )
+end
+
+--- Resets both the index and the worktree back to HEAD. A staged addition is
+--- removed from disk, and a staged rename is returned to its original name.
+---@param root string
+---@param paths string[]
+---@param callback fun(ok: boolean, err: string?)
+function M.discard_all_changes(root, paths, callback)
+  paths = type(paths) == "string" and { paths } or paths
+  return runner.run(
+    with_paths({ "restore", "--staged", "--worktree" }, paths),
+    { cwd = root, readonly = false },
+    done(callback)
+  )
+end
+
+---@param root string
 ---@param path string
 ---@param callback fun(ok: boolean, err: string?)
-function M.discard_file(root, path, callback)
+function M.remove_untracked(root, path, callback)
   return runner.run(
-    { "restore", "--worktree", "--", path },
+    { "clean", "--force", "-d", "--", path },
     { cwd = root, readonly = false },
     done(callback)
   )

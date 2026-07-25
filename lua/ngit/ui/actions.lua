@@ -30,15 +30,33 @@ local definitions = {
     end,
   },
   {
+    id = "stage_all",
+    mapping = "stage_all",
+    label = "Stage all",
+    panels = panels("status"),
+    method = "stage_all",
+    enabled = function(context)
+      return context.unstaged_count ~= nil and context.unstaged_count > 0
+    end,
+  },
+  {
+    id = "unstage_all",
+    mapping = "unstage_all",
+    label = "Unstage all",
+    panels = panels("status"),
+    method = "unstage_all",
+    enabled = function(context)
+      return context.staged_count ~= nil and context.staged_count > 0
+    end,
+  },
+  {
     id = "discard",
     mapping = "discard",
     label = "Discard",
     panels = panels("status"),
     method = "discard",
     enabled = function(context)
-      return context.entry
-        and context.entry.section == "unstaged"
-        and context.entry.file.kind ~= "untracked"
+      return context.entry ~= nil and context.entry.section ~= "conflict"
     end,
   },
   {

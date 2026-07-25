@@ -187,7 +187,9 @@ local function structured_diff(lines)
       end
       files[#files + 1] = current
     elseif not current then
-      if line ~= "" and not line:match("^%s*[%d]+ files? changed") then
+      -- Preamble text: author, date, message, diffstat. The bare "---" is the
+      -- separator git prints before a diffstat and carries nothing to show.
+      if line ~= "" and line ~= "---" and not line:match("^%s*[%d]+ files? changed") then
         metadata.lines[#metadata.lines + 1] = line
       end
     elseif vim.startswith(line, "--- ") then

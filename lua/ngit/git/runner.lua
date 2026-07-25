@@ -111,10 +111,35 @@ function M.ok(result, accepted)
   return accepted ~= nil and accepted[result.code] == true
 end
 
+local max_message_lines = 10
+local max_message_bytes = 600
+
+-- Git reports several ordinary refusals on stdout rather than stderr; the
+-- clearest example is `git commit` answering "nothing to commit" with status 1
+-- and an empty stderr. Reporting only stderr turns those into a bare exit code.
+local function summarize(value)
+  local trimmed = (value or ""):gsub("%s+$", "")
+  if trimmed == "" then
+    return ""
+  end
+  if #trimmed > max_message_bytes then
+    trimmed = trimmed:sub(1, max_message_bytes) .. "…"
+  end
+  local lines = vim.split(trimmed, "\n", { plain = true })
+  if #lines > max_message_lines then
+    lines = vim.list_slice(lines, 1, max_message_lines)
+    lines[#lines + 1] = "…"
+  end
+  return table.concat(lines, "\n")
+end
+
 ---@param result NgitGitResult
 ---@return string
 function M.error_message(result)
-  local message = result.stderr:gsub("%s+$", "")
+  local message = summarize(result.stderr)
+  if message == "" then
+    message = summarize(result.stdout)
+  end
   if message == "" then
     message = ("Git exited with status %d"):format(result.code)
   end

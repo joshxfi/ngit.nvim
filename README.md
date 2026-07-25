@@ -25,7 +25,9 @@ without losing repository context.
 - Multi-line commit editor, amend support, and stash workflows.
 - Streaming fetch, fast-forward pull, and push console.
 - Merge/rebase/cherry-pick detection and conflict-side resolution.
-- Guarded worktree discard.
+- Confirmed, section-aware discard for staged, unstaged, and untracked files.
+- Rename-aware staging, unstaging, and discarding.
+- Push offers `--set-upstream` instead of failing on a fresh branch.
 - Asynchronous Git operations; the editor event loop is never blocked.
 - Stale-request cancellation, debounced previews, and a bounded LRU cache.
 - NUL-delimited porcelain-v2 parsing for unusual filenames.
@@ -93,7 +95,21 @@ The selected section defines the comparison:
 
 From the file panel, `s` and `u` act on the whole file. From a hunk in the diff
 panel, they stage or unstage only that hunk. Hunk operations are deliberately
-disabled when the preview was truncated.
+disabled when the preview was truncated. `a` and `A` stage or unstage
+everything at once.
+
+`X` discards the selected change and always names what it is about to do:
+
+| Section | Result of `X` |
+| --- | --- |
+| Unstaged | worktree returns to the staged content |
+| Staged | index and worktree both return to `HEAD` |
+| Untracked | the file is deleted |
+| Conflicts | refused; resolve with `co`/`ct` or abort the operation |
+
+Renames occupy two index slots, so staging, unstaging, and discarding all act
+on the old and new path together. A file with unsaved changes in a loaded
+buffer is never overwritten.
 
 Focus dashboard areas without closing ngit:
 
@@ -129,7 +145,9 @@ All mappings are buffer-local.
 | `dv` | Toggle side-by-side/unified diff |
 | `s` | Stage file or current hunk |
 | `u` | Unstage file or current hunk |
-| `X` | Discard tracked worktree changes after confirmation |
+| `a` | Stage every change (Changes panel) |
+| `A` | Unstage every change (Changes panel) |
+| `X` | Discard the selected change after confirmation |
 | `o` | Open selected file |
 | `/` | Filter changed files |
 | `0` | Focus the selected diff |
@@ -137,7 +155,7 @@ All mappings are buffer-local.
 | `?` | Show help |
 | `x` | Switch branch, or copy a selected commit hash |
 | `n` | Create a branch or stash |
-| `a` / `p` | Apply/pop a stash |
+| `a` / `p` | Apply/pop a stash (Stashes panel) |
 | `D` | Delete a merged local branch or drop a stash, with confirmation |
 | `c` / `C` | Create/amend a commit using a `gitcommit` buffer |
 | `f` / `U` / `P` | Fetch, fast-forward pull, or push |
@@ -219,9 +237,15 @@ called.
 ## Safety
 
 Read operations run with `GIT_OPTIONAL_LOCKS=0`. Commands use argument arrays
-and literal pathspecs rather than a shell. Discard is limited to tracked
-worktree changes and asks for confirmation by default; ngit never deletes
-untracked files.
+and literal pathspecs rather than a shell. Every discard names its exact effect
+and asks for confirmation by default, so an untracked file is only deleted when
+that is what was requested. A file with unsaved changes in a loaded buffer is
+never overwritten, and open buffers are rechecked after any mutation.
+
+Failures report what Git actually said. Several ordinary refusals — including
+`nothing to commit` — arrive on standard output rather than standard error, so
+both are considered before falling back to an exit code. Committing checks for
+unresolved conflicts and an empty index before opening an editor.
 
 Branch deletion uses Git's merged-only `-d` behavior. Pull is deliberately
 fast-forward-only. ngit never force-pushes, and aborting an active Git operation
@@ -237,7 +261,16 @@ jobs are terminated, and cached patches are bounded by `cache_entries`. Large
 previews are truncated at `max_diff_bytes`. Cached previews are also bounded by
 `max_cache_bytes`, so a handful of large patches cannot exhaust the intended
 cache budget. Each raw patch is parsed once into the presentation model;
-switching split/unified views does not invoke Git again.
+switching split/unified views does not invoke Git again. The last few
+presentation models are kept as well, so moving back over a file redraws
+without rebuilding them.
+
+Source line numbers are drawn through `'statuscolumn'` rather than one virtual
+text mark per line, so a patch costs nothing for rows that are never displayed.
+Syntax highlighting is skipped for very large previews. Detecting an
+in-progress merge, rebase, cherry-pick, or revert stats the Git directory
+instead of spawning a process on every refresh, and saving a file outside the
+repository does not trigger one at all.
 
 The included deterministic microbenchmark uses generated fixtures, warm-up
 runs, and the median of seven timed samples:
@@ -247,19 +280,36 @@ make benchmark
 ```
 
 Representative results from an Apple M4 with 24 GB RAM, Neovim 0.12.4, on
-2026-07-25:
+2026-07-26:
 
 | Workload | Fixture | Median |
 | --- | ---: | ---: |
-| Porcelain-v2 status parser | 10,000 files | 13.235 ms |
-| Commit parser | 10,000 commits | 36.924 ms |
-| Branch parser | 10,000 refs | 25.767 ms |
-| Diff presentation | 4 KiB near-identical lines | 0.750 ms |
+| Porcelain-v2 status parser | 10,000 files | 6.4 ms |
+| Commit parser | 10,000 commits | 18.0 ms |
+| Branch parser | 10,000 refs | 11.7 ms |
+| Diff presentation | 4 KiB near-identical lines | 0.37 ms |
+| Diff presentation | 4,000-line patch | 14.7 ms |
+| Preview render, unified | 4,000-line patch | 5.7 ms |
+| Preview render, side by side | 4,000-line patch | 6.7 ms |
 
-These numbers measure in-process parsing and diff-model construction, not Git
-process startup, disk I/O, or screen rendering. They are reference points for
-regression checks rather than performance guarantees; run `make benchmark` on
-your own machine when comparing changes.
+The parser rows measure in-process parsing and diff-model construction, not Git
+process startup or disk I/O. The two preview-render rows do include drawing:
+buffer population, highlight extmarks, and the source-number gutter, which is
+the cost paid on every selection change.
+
+Moving that gutter from one virtual-text extmark per line to `'statuscolumn'`
+is worth measuring directly. Against the same fixture and machine:
+
+| Preview render | Before | After |
+| --- | ---: | ---: |
+| Unified | 12.5 ms | 5.7 ms |
+| Side by side | 15.2 ms | 6.7 ms |
+
+The parser figures above are unchanged by that work; they read faster than
+earlier recordings only because the machine was quieter, so treat them as a
+fresh baseline rather than an improvement. All of these are reference points
+for regression checks rather than performance guarantees; run `make benchmark`
+on your own machine when comparing changes.
 
 ## Development
 

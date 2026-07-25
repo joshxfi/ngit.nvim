@@ -190,7 +190,17 @@ test("semantic diff model aligns old and new rows without raw plumbing", functio
   truthy(table.concat(split.left.lines, "\n"):find("local value = 'old'", 1, true))
   truthy(table.concat(split.right.lines, "\n"):find("local value = 'new'", 1, true))
   truthy(not table.concat(split.left.lines, "\n"):find("diff --git", 1, true))
-  truthy(split.left.row_hunks[3])
+  -- The commit preamble leads the body, so hunk rows are located by content.
+  truthy(table.concat(split.left.lines, "\n"):find("Author: Test User", 1, true))
+  local hunk_row
+  for row, line in ipairs(split.left.lines) do
+    if line:find("local value = 'old'", 1, true) then
+      hunk_row = row
+    end
+  end
+  truthy(hunk_row)
+  truthy(split.left.row_hunks[hunk_row])
+  equal(1, #split.hunks)
   local groups = {}
   for _, item in ipairs(split.left.highlights) do
     groups[item.group] = true
@@ -1271,6 +1281,371 @@ test("session dashboard keeps all Git contexts visible with the diff on the righ
   vim.o.laststatus = previous_laststatus
   for _, buffer in ipairs(dashboard_buffers) do
     equal(false, vim.api.nvim_buf_is_valid(buffer))
+  end
+end)
+
+test("git refusals printed on stdout reach the caller", function()
+  local runner = require("ngit.git.runner")
+  equal(
+    "On branch main\nnothing to commit, working tree clean",
+    runner.error_message({
+      code = 1,
+      stdout = "On branch main\nnothing to commit, working tree clean\n",
+      stderr = "",
+    })
+  )
+  equal(
+    "fatal: bad revision",
+    runner.error_message({ code = 128, stdout = "ignored", stderr = "fatal: bad revision\n" })
+  )
+  equal("Git exited with status 3", runner.error_message({ code = 3, stdout = "", stderr = "" }))
+  local long = runner.error_message({ code = 1, stdout = string.rep("noise\n", 500), stderr = "" })
+  truthy(#long < 200, "an oversized stream must be summarized, got " .. #long)
+end)
+
+test("committing with nothing staged explains why instead of an exit code", function()
+  local root = repository()
+  write_file(vim.fs.joinpath(root, "a.txt"), "one\n")
+  git(root, { "add", "-A" })
+  git(root, { "commit", "-qm", "init" })
+
+  local ok, err = wait_for(function(done)
+    require("ngit.git.mutate").commit(root, "no changes", false, done)
+  end)
+  equal(false, ok)
+  truthy(err:find("nothing to commit", 1, true), "unexpected message: " .. tostring(err))
+end)
+
+test("unstaging a rename clears both of its index slots", function()
+  local root = repository()
+  write_file(vim.fs.joinpath(root, "old.txt"), string.rep("content line\n", 20))
+  git(root, { "add", "-A" })
+  git(root, { "commit", "-qm", "init" })
+  os.rename(vim.fs.joinpath(root, "old.txt"), vim.fs.joinpath(root, "new.txt"))
+  git(root, { "add", "-A" })
+
+  local staged = wait_for(function(done)
+    require("ngit.git.status").load(root, done)
+  end)
+  equal(1, #staged.files)
+  equal("renamed", staged.files[1].kind)
+  equal("old.txt", staged.files[1].old_path)
+
+  local ok = wait_for(function(done)
+    require("ngit.git.mutate").unstage_file(root, { "new.txt", "old.txt" }, done)
+  end)
+  equal(true, ok)
+
+  -- The rename becomes an untracked new.txt plus a worktree deletion of
+  -- old.txt: the real state, with nothing left staged on either path.
+  local after = wait_for(function(done)
+    require("ngit.git.status").load(root, done)
+  end)
+  local paths = {}
+  for _, file in ipairs(after.files) do
+    truthy(
+      file.index_status == "." or file.index_status == "?",
+      ("%s is still staged as %q"):format(file.path, file.index_status)
+    )
+    paths[file.path] = true
+  end
+  truthy(paths["new.txt"], "the renamed file should now be untracked")
+  truthy(paths["old.txt"], "the original path should show as deleted")
+end)
+
+test("discarding a staged change restores the file and empties the index", function()
+  local root = repository()
+  local path = vim.fs.joinpath(root, "a.txt")
+  write_file(path, "one\n")
+  git(root, { "add", "-A" })
+  git(root, { "commit", "-qm", "init" })
+  write_file(path, "two\n")
+  git(root, { "add", "-A" })
+
+  local ok = wait_for(function(done)
+    require("ngit.git.mutate").discard_all_changes(root, { "a.txt" }, done)
+  end)
+  equal(true, ok)
+  equal("one\n", read_file(path))
+
+  local after = wait_for(function(done)
+    require("ngit.git.status").load(root, done)
+  end)
+  equal(0, #after.files)
+end)
+
+test("discarding a staged addition removes the file from the worktree", function()
+  local root = repository()
+  write_file(vim.fs.joinpath(root, "base.txt"), "base\n")
+  git(root, { "add", "-A" })
+  git(root, { "commit", "-qm", "init" })
+  local added = vim.fs.joinpath(root, "added.txt")
+  write_file(added, "new\n")
+  git(root, { "add", "-A" })
+
+  local ok = wait_for(function(done)
+    require("ngit.git.mutate").discard_all_changes(root, { "added.txt" }, done)
+  end)
+  equal(true, ok)
+  equal(nil, vim.uv.fs_stat(added))
+end)
+
+test("an untracked file can be deleted through the discard action", function()
+  local root = repository()
+  write_file(vim.fs.joinpath(root, "a.txt"), "a\n")
+  git(root, { "add", "-A" })
+  git(root, { "commit", "-qm", "init" })
+  local junk = vim.fs.joinpath(root, "junk.txt")
+  write_file(junk, "junk\n")
+
+  local ok = wait_for(function(done)
+    require("ngit.git.mutate").remove_untracked(root, "junk.txt", done)
+  end)
+  equal(true, ok)
+  equal(nil, vim.uv.fs_stat(junk))
+end)
+
+test("discard prompts before touching an untracked file and honours cancel", function()
+  local root = repository()
+  write_file(vim.fs.joinpath(root, "a.txt"), "a\n")
+  git(root, { "add", "-A" })
+  git(root, { "commit", "-qm", "init" })
+  local junk = vim.fs.joinpath(root, "junk.txt")
+  write_file(junk, "junk\n")
+
+  require("ngit").open({ cwd = root })
+  truthy(vim.wait(10000, function()
+    local session = require("ngit")._active_session()
+    return session and session.status and #session.panels.status.entries == 1
+  end, 10))
+
+  local session = require("ngit")._active_session()
+  local prompts = {}
+  local previous = vim.ui.select
+  vim.ui.select = function(_, opts, callback)
+    prompts[#prompts + 1] = opts.prompt
+    callback("Cancel")
+  end
+  session:discard()
+  vim.ui.select = previous
+
+  equal(1, #prompts)
+  truthy(prompts[1]:find("Delete untracked file junk.txt", 1, true), prompts[1])
+  truthy(vim.uv.fs_stat(junk) ~= nil, "cancelling must leave the file in place")
+  require("ngit").close()
+end)
+
+test("stage all and unstage all cover every pending change", function()
+  local root = repository()
+  write_file(vim.fs.joinpath(root, "a.txt"), "one\n")
+  git(root, { "add", "-A" })
+  git(root, { "commit", "-qm", "init" })
+  write_file(vim.fs.joinpath(root, "a.txt"), "two\n")
+  write_file(vim.fs.joinpath(root, "b.txt"), "new\n")
+
+  local mutate = require("ngit.git.mutate")
+  equal(
+    true,
+    wait_for(function(done)
+      mutate.stage_all(root, done)
+    end)
+  )
+  local staged = wait_for(function(done)
+    require("ngit.git.status").load(root, done)
+  end)
+  equal(2, #staged.files)
+  for _, file in ipairs(staged.files) do
+    truthy(file.index_status ~= "." and file.index_status ~= "?", file.path .. " is not staged")
+  end
+
+  equal(
+    true,
+    wait_for(function(done)
+      mutate.unstage_all(root, done)
+    end)
+  )
+  local after = wait_for(function(done)
+    require("ngit.git.status").load(root, done)
+  end)
+  equal(2, #after.files)
+  for _, file in ipairs(after.files) do
+    truthy(
+      file.index_status == "." or file.index_status == "?",
+      ("%s is still staged as %q"):format(file.path, file.index_status)
+    )
+  end
+end)
+
+test("the commit editor is refused before opening when nothing is staged", function()
+  local root = repository()
+  write_file(vim.fs.joinpath(root, "a.txt"), "one\n")
+  git(root, { "add", "-A" })
+  git(root, { "commit", "-qm", "init" })
+  write_file(vim.fs.joinpath(root, "a.txt"), "two\n")
+
+  require("ngit").open({ cwd = root })
+  truthy(vim.wait(10000, function()
+    local session = require("ngit")._active_session()
+    return session and session.status and #session.panels.status.entries == 1
+  end, 10))
+
+  local session = require("ngit")._active_session()
+  local messages = {}
+  local previous = vim.notify
+  vim.notify = function(message)
+    messages[#messages + 1] = tostring(message)
+  end
+  session:prompt_commit(false)
+  vim.notify = previous
+
+  equal(nil, session.commit_editor)
+  equal(1, #messages)
+  truthy(messages[1]:find("Nothing is staged", 1, true), messages[1])
+  require("ngit").close()
+end)
+
+test("amending an unborn branch reports the cause instead of a git fatal", function()
+  local root = repository()
+  write_file(vim.fs.joinpath(root, "a.txt"), "one\n")
+
+  require("ngit").open({ cwd = root })
+  truthy(vim.wait(10000, function()
+    local session = require("ngit")._active_session()
+    return session and session.status ~= nil
+  end, 10))
+
+  local session = require("ngit")._active_session()
+  local messages = {}
+  local previous = vim.notify
+  vim.notify = function(message)
+    messages[#messages + 1] = tostring(message)
+  end
+  session:prompt_commit(true)
+  truthy(vim.wait(10000, function()
+    return #messages > 0
+  end, 10))
+  vim.notify = previous
+
+  equal(nil, session.commit_editor)
+  truthy(messages[1]:find("no commit to amend", 1, true), messages[1])
+  require("ngit").close()
+end)
+
+test("toggling the diff layout preserves the weighted panel heights", function()
+  local root = repository()
+  write_file(vim.fs.joinpath(root, "a.txt"), "one\n")
+  git(root, { "add", "-A" })
+  git(root, { "commit", "-qm", "init" })
+  write_file(vim.fs.joinpath(root, "a.txt"), "two\n")
+
+  require("ngit").open({ cwd = root })
+  truthy(vim.wait(10000, function()
+    local session = require("ngit")._active_session()
+    return session and session.status and session.current_diff ~= nil
+  end, 10))
+
+  local session = require("ngit")._active_session()
+  local Dashboard = require("ngit.ui.dashboard")
+  local function heights()
+    local result = {}
+    for _, id in ipairs(Dashboard.panel_order) do
+      result[id] = vim.api.nvim_win_get_height(session.dashboard.panels[id].window)
+    end
+    return result
+  end
+
+  local before = heights()
+  session:toggle_diff_layout()
+  session:toggle_diff_layout()
+  equal(before, heights())
+  require("ngit").close()
+end)
+
+test("commit previews carry the message and stat into the scrollable body", function()
+  local root = repository()
+  write_file(vim.fs.joinpath(root, "a.txt"), "one\n")
+  git(root, { "add", "-A" })
+  git(root, { "commit", "-qm", "feat: a subject line\n\nA body paragraph worth reading." })
+
+  local commits = wait_for(function(done)
+    require("ngit.git.log").list(root, {}, done)
+  end)
+  equal(1, #commits)
+  local diff = wait_for(function(done)
+    require("ngit.git.log").show(root, commits[1].oid, 1024 * 1024, done)
+  end)
+
+  local view = require("ngit.ui.diff_view")
+  local split = view.split(diff, { title = "commit" })
+  local body = table.concat(split.left.lines, "\n")
+  truthy(body:find("A body paragraph worth reading.", 1, true), "message body is missing")
+  truthy(body:find("feat: a subject line", 1, true), "subject is missing")
+
+  -- The header window stays two lines so its height never shifts the layout.
+  equal(2, #split.header)
+  local unified = view.unified(diff, { title = "commit" }, split)
+  truthy(
+    table.concat(unified.unified.lines, "\n"):find("A body paragraph worth reading.", 1, true),
+    "unified view dropped the message body"
+  )
+end)
+
+test("the diff gutter answers only for the row being drawn", function()
+  local gutter = require("ngit.ui.gutter")
+  local buffer = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_lines(buffer, 0, -1, false, { "a", "b", "c" })
+  gutter.attach(buffer, {
+    source_numbers = { 12, false, 14 },
+    source_kinds = { "add", false, "delete" },
+  })
+
+  vim.api.nvim_buf_call(buffer, function()
+    vim.v.lnum = 1
+    truthy(gutter.render():find("12", 1, true))
+    truthy(gutter.render():find("NgitDiffAddNumber", 1, true))
+    vim.v.lnum = 2
+    equal(gutter.width, #gutter.render())
+    vim.v.lnum = 3
+    truthy(gutter.render():find("NgitDiffDeleteNumber", 1, true))
+  end)
+
+  gutter.detach(buffer)
+  vim.api.nvim_buf_call(buffer, function()
+    vim.v.lnum = 1
+    equal(gutter.width, #gutter.render())
+  end)
+  vim.api.nvim_buf_delete(buffer, { force = true })
+end)
+
+test("help opens as a grouped float that closes on q", function()
+  local mappings = require("ngit.config").defaults().mappings
+  local window = require("ngit.ui.help").open(mappings)
+  truthy(window and vim.api.nvim_win_is_valid(window))
+
+  local buffer = vim.api.nvim_win_get_buf(window)
+  local text = table.concat(vim.api.nvim_buf_get_lines(buffer, 0, -1, false), "\n")
+  truthy(text:find("Changes", 1, true))
+  truthy(text:find("Stage everything", 1, true))
+  truthy(text:find("Conflicts and remotes", 1, true))
+  truthy(vim.api.nvim_win_get_config(window).relative == "editor")
+
+  vim.api.nvim_set_current_win(window)
+  vim.api.nvim_feedkeys("q", "x", false)
+  equal(false, vim.api.nvim_win_is_valid(window))
+end)
+
+test("every action a panel offers is reachable from its own mapping", function()
+  local mappings = require("ngit.config").defaults().mappings
+  local Session = require("ngit.ui.session")
+  for _, action in ipairs(require("ngit.ui.actions").definitions()) do
+    truthy(
+      mappings[action.mapping] ~= nil,
+      ("action %q references unknown mapping %q"):format(action.id, action.mapping)
+    )
+    truthy(
+      type(Session[action.method]) == "function",
+      ("action %q has no session method %q"):format(action.id, action.method)
+    )
   end
 end)
 

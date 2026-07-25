@@ -91,6 +91,7 @@ function M.full(self)
   self.generation = self.refresh_generation
   local generation = self.refresh_generation
   self.cache:clear()
+  self.model_cache:clear()
   clear_preview(self, "Refreshing repository…")
 
   local preferred = {}

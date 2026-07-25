@@ -178,6 +178,10 @@ function Session.new(root)
       return diff.estimated_bytes or #(diff.text or "")
     end,
   })
+  -- Presentation models cost several times the parsed diff they come from, so
+  -- they get a much shallower cache of their own. Holding only the handful of
+  -- entries around the cursor is what makes j/k through a file list feel free.
+  self.model_cache = Lru.new(4)
   return self
 end
 
@@ -367,9 +371,16 @@ function Session:install_autocommands()
   })
 
   if self.config.auto_refresh then
+    -- Only writes inside this repository can change its status; refreshing for
+    -- every save in the editor spawns Git for nothing.
+    local prefix = self.root:gsub("/*$", "") .. "/"
     vim.api.nvim_create_autocmd("BufWritePost", {
       group = self.augroup,
-      callback = function()
+      callback = function(event)
+        local name = event.match or ""
+        if name ~= "" and not vim.startswith(vim.fs.normalize(name), prefix) then
+          return
+        end
         self:schedule_refresh("status")
       end,
     })
@@ -417,6 +428,10 @@ function Session:dispose()
     self.commit_editor:close()
     self.commit_editor = nil
   end
+  if self.help_window and vim.api.nvim_win_is_valid(self.help_window) then
+    pcall(vim.api.nvim_win_close, self.help_window, true)
+  end
+  self.help_window = nil
   if self.augroup then
     pcall(vim.api.nvim_del_augroup_by_id, self.augroup)
   end
@@ -438,7 +453,11 @@ function Session:close()
   self:dispose()
   if valid_tab(tab) then
     vim.api.nvim_set_current_tabpage(tab)
-    vim.cmd("tabclose")
+    -- Closing the only remaining tab page is an error rather than a no-op, and
+    -- the origin tab may already be gone by the time the dashboard is closed.
+    if not pcall(vim.cmd, "tabclose") then
+      pcall(vim.cmd, "enew")
+    end
   end
   if valid_tab(origin) then
     vim.api.nvim_set_current_tabpage(origin)
@@ -493,11 +512,24 @@ function Session:update_actions()
     return
   end
   local panel = self:active_state()
+  local staged_count, unstaged_count = 0, 0
+  for _, file in ipairs(self.status and self.status.files or {}) do
+    if file.kind ~= "conflict" then
+      if status_present(file.index_status) then
+        staged_count = staged_count + 1
+      end
+      if status_present(file.worktree_status) or file.kind == "untracked" then
+        unstaged_count = unstaged_count + 1
+      end
+    end
+  end
   local context = {
     panel = self.active_panel,
     entry = panel.entries[panel.selected],
     operation = self.operation,
     has_more = panel.has_more,
+    staged_count = staged_count,
+    unstaged_count = unstaged_count,
   }
   local items = actions.for_context(context, self.config.mappings)
   local group
@@ -547,7 +579,6 @@ function Session:render_files(preferred_key)
   local lines = {}
   local row_entries = {}
   local entries = {}
-  local section_rows = {}
   local row_highlights = {}
 
   for _, section in ipairs(section_order) do
@@ -556,8 +587,12 @@ function Session:render_files(preferred_key)
       if #lines > 0 then
         lines[#lines + 1] = ""
       end
-      lines[#lines + 1] = ("  %s (%d)"):format(section_titles[section], #group)
-      section_rows[#section_rows + 1] = { row = #lines - 1, section = section }
+      local heading = Render.section(section_titles[section], #group, section_highlights[section])
+      lines[#lines + 1] = heading.text
+      for _, span in ipairs(heading.spans) do
+        span.row = #lines - 1
+        row_highlights[#row_highlights + 1] = span
+      end
       for _, entry in ipairs(group) do
         entries[#entries + 1] = entry
         local rendered = Render.status(
@@ -613,12 +648,7 @@ function Session:render_files(preferred_key)
     selected_row = entries[panel.selected] and entries[panel.selected].row or nil,
     empty = #entries == 0,
     detail = self.status.branch .. suffix,
-    highlights = vim.list_extend(
-      row_highlights,
-      vim.tbl_map(function(item)
-        return { row = item.row, group = section_highlights[item.section], line = true }
-      end, section_rows)
-    ),
+    highlights = row_highlights,
   })
   if self.active_panel == "status" then
     self:sync_active_aliases()
@@ -855,11 +885,12 @@ end
 function Session:render_preview(entry, diff)
   self.current_diff = diff
   local opts = { title = self:preview_title(entry), entry = entry }
-  local split = DiffView.split(diff, opts)
-  local models = {
-    split = split,
-    unified = nil,
-  }
+  local key = self:cache_key(entry)
+  local models = self.model_cache:get(key)
+  if not models then
+    models = { split = DiffView.split(diff, opts), unified = nil }
+    self.model_cache:set(key, models)
+  end
   self.current_diff_models = models
   self.current_diff_opts = opts
   local layout = self.diff_layout_override or self.dashboard:desired_preview_layout()
@@ -1006,6 +1037,8 @@ end
 Session.after_mutation = SessionCommands.after_mutation
 Session.stage = SessionCommands.stage
 Session.unstage = SessionCommands.unstage
+Session.stage_all = SessionCommands.stage_all
+Session.unstage_all = SessionCommands.unstage_all
 Session.discard = SessionCommands.discard
 Session.open_file = SessionCommands.open_file
 Session.prompt_filter = SessionCommands.prompt_filter
@@ -1025,7 +1058,16 @@ function Session:help_lines()
 end
 
 function Session:show_help()
-  notify(table.concat(self:help_lines(), "\n"))
+  if self.help_window and vim.api.nvim_win_is_valid(self.help_window) then
+    vim.api.nvim_set_current_win(self.help_window)
+    return
+  end
+  local ok, window = pcall(Help.open, self.config.mappings)
+  if ok then
+    self.help_window = window
+  else
+    notify(table.concat(self:help_lines(), "\n"))
+  end
 end
 
 return Session

@@ -33,14 +33,49 @@ local function entry_key(entry)
   return entry.section .. "\0" .. entry.file.path
 end
 
+--- A rename occupies two index slots, so every path-scoped mutation has to name
+--- the old path as well or the untouched half survives as a phantom entry.
+local function entry_paths(entry)
+  if entry.file.old_path and entry.file.old_path ~= entry.file.path then
+    return { entry.file.path, entry.file.old_path }
+  end
+  return { entry.file.path }
+end
+
 function M.after_mutation(self, ok, err)
   if not ok then
     self:set_result(err or "Git operation failed", false)
     notify(err or "Git operation failed", vim.log.levels.ERROR)
     return
   end
+  -- A mutation may have rewritten files that are open elsewhere in the editor.
+  pcall(vim.cmd, "checktime")
   self:set_result("Git operation completed", true)
   self:refresh()
+end
+
+--- Refuses to overwrite a file that has unsaved edits in a loaded buffer.
+local function worktree_is_safe(self, paths)
+  for _, path in ipairs(paths) do
+    local buffer = vim.fn.bufnr(vim.fs.joinpath(self.root, path))
+    if buffer ~= -1 and vim.api.nvim_buf_is_loaded(buffer) and vim.bo[buffer].modified then
+      notify(("Save or discard the modified buffer for %s first"):format(path), vim.log.levels.WARN)
+      return false
+    end
+  end
+  return true
+end
+
+local function confirm(self, prompt, label, perform)
+  if not self.config.confirm_discard then
+    perform()
+    return
+  end
+  vim.ui.select({ "Cancel", label }, { prompt = prompt }, function(choice)
+    if choice == label then
+      perform()
+    end
+  end)
 end
 
 function M.stage(self)
@@ -57,7 +92,7 @@ function M.stage(self)
       M.after_mutation(self, ok, err)
     end)
   else
-    mutate.stage_file(self.root, entry.file.path, function(ok, err)
+    mutate.stage_file(self.root, entry_paths(entry), function(ok, err)
       M.after_mutation(self, ok, err)
     end)
   end
@@ -77,10 +112,28 @@ function M.unstage(self)
       M.after_mutation(self, ok, err)
     end)
   else
-    mutate.unstage_file(self.root, entry.file.path, function(ok, err)
+    mutate.unstage_file(self.root, entry_paths(entry), function(ok, err)
       M.after_mutation(self, ok, err)
     end)
   end
+end
+
+function M.stage_all(self)
+  if self.active_panel ~= "status" then
+    return
+  end
+  mutate.stage_all(self.root, function(ok, err)
+    M.after_mutation(self, ok, err)
+  end)
+end
+
+function M.unstage_all(self)
+  if self.active_panel ~= "status" then
+    return
+  end
+  mutate.unstage_all(self.root, function(ok, err)
+    M.after_mutation(self, ok, err)
+  end)
 end
 
 function M.discard(self)
@@ -88,40 +141,48 @@ function M.discard(self)
     return
   end
   local entry = self:selected_entry()
-  if not entry or entry.section ~= "unstaged" then
+  if not entry then
     return
   end
-  if entry.file.kind == "untracked" then
-    notify("ngit does not delete untracked files", vim.log.levels.WARN)
+  if entry.section == "conflict" then
+    notify("Resolve the conflict with ours/theirs, or abort the operation", vim.log.levels.WARN)
     return
   end
 
-  local absolute_path = vim.fs.joinpath(self.root, entry.file.path)
-  local buffer = vim.fn.bufnr(absolute_path)
-  if buffer ~= -1 and vim.api.nvim_buf_is_loaded(buffer) and vim.bo[buffer].modified then
-    notify(
-      "Save or discard the modified Neovim buffer before restoring this file",
-      vim.log.levels.WARN
+  local paths = entry_paths(entry)
+  if not worktree_is_safe(self, paths) then
+    return
+  end
+
+  if entry.section == "untracked" then
+    confirm(
+      self,
+      ("Delete untracked file %s? This cannot be undone."):format(entry.file.path),
+      "Delete",
+      function()
+        mutate.remove_untracked(self.root, entry.file.path, function(ok, err)
+          M.after_mutation(self, ok, err)
+        end)
+      end
     )
-    return
-  end
-
-  local function perform()
-    mutate.discard_file(self.root, entry.file.path, function(ok, err)
-      M.after_mutation(self, ok, err)
+  elseif entry.section == "staged" then
+    confirm(
+      self,
+      ("Discard staged and worktree changes in %s?"):format(entry.file.path),
+      "Discard",
+      function()
+        mutate.discard_all_changes(self.root, paths, function(ok, err)
+          M.after_mutation(self, ok, err)
+        end)
+      end
+    )
+  else
+    confirm(self, ("Discard worktree changes in %s?"):format(entry.file.path), "Discard", function()
+      mutate.discard_file(self.root, paths, function(ok, err)
+        M.after_mutation(self, ok, err)
+      end)
     end)
   end
-  if not self.config.confirm_discard then
-    perform()
-    return
-  end
-  vim.ui.select({ "Cancel", "Discard" }, {
-    prompt = ("Discard worktree changes in %s?"):format(entry.file.path),
-  }, function(choice)
-    if choice == "Discard" then
-      perform()
-    end
-  end)
 end
 
 function M.open_file(self)
@@ -251,6 +312,18 @@ function M.apply_item(self, pop)
   end)
 end
 
+local function staged_summary(status)
+  local staged, conflicts = 0, 0
+  for _, file in ipairs(status and status.files or {}) do
+    if file.kind == "conflict" then
+      conflicts = conflicts + 1
+    elseif file.index_status ~= "." and file.index_status ~= " " and file.index_status ~= "?" then
+      staged = staged + 1
+    end
+  end
+  return staged, conflicts
+end
+
 function M.prompt_commit(self, amend)
   if self.active_panel ~= "status" then
     return
@@ -261,6 +334,24 @@ function M.prompt_commit(self, amend)
     end
     return
   end
+
+  -- Catch the two refusals git would only report after a message was typed.
+  local staged, conflicts = staged_summary(self.status)
+  if conflicts > 0 then
+    notify(
+      ("Resolve %d conflicted file%s before committing"):format(
+        conflicts,
+        conflicts == 1 and "" or "s"
+      ),
+      vim.log.levels.WARN
+    )
+    return
+  end
+  if staged == 0 and not amend and not self.operation then
+    notify("Nothing is staged to commit", vim.log.levels.WARN)
+    return
+  end
+
   local function open_editor(message)
     if self.closed then
       return
@@ -269,6 +360,8 @@ function M.prompt_commit(self, amend)
     self.commit_editor = CommitEditor.new(self.root, {
       amend = amend,
       message = message,
+      staged = staged,
+      branch = self.status and self.status.branch or nil,
       on_complete = function()
         self.commit_editor = nil
         if not self.closed then
@@ -277,10 +370,16 @@ function M.prompt_commit(self, amend)
       end,
     })
   end
+
   if amend then
     log_backend.head_message(self.root, function(message, err)
       if not message then
-        notify(err or "Unable to load the current commit message", vim.log.levels.ERROR)
+        local unborn = (err or ""):find("does not have any commits yet", 1, true)
+        notify(
+          unborn and "There is no commit to amend yet"
+            or (err or "Unable to load the current commit message"),
+          vim.log.levels.WARN
+        )
         return
       end
       open_editor(message)
@@ -321,25 +420,31 @@ function M.load_more(self)
   panel.job = job
 end
 
+local command_labels = {
+  fetch = "git fetch --all --prune",
+  pull = "git pull --ff-only",
+  push = "git push",
+}
+
 function M.run_remote(self, operation)
   if self.remote_console and self.remote_console.running then
     notify("A remote operation is already running", vim.log.levels.WARN)
     return
   end
   local Console = require("ngit.ui.console")
-  local command_labels = {
-    fetch = "git fetch --all --prune",
-    pull = "git pull --ff-only",
-    push = "git push",
-  }
   local console = Console.new(command_labels[operation])
   self.remote_console = console
-  console.process = remote_backend.run(self.root, operation, function(stream, data)
+
+  local transcript = {}
+  local function on_chunk(stream, data)
+    transcript[#transcript + 1] = data
     console:append(data, stream)
-  end, function(ok, result)
-    console:finish(ok, result.code)
+  end
+
+  local function settle(ok, code)
+    console:finish(ok, code)
     self:set_result(
-      ok and (operation .. " completed") or (operation .. (" failed (%d)"):format(result.code)),
+      ok and (operation .. " completed") or (operation .. (" failed (%d)"):format(code)),
       ok
     )
     if self.remote_console == console then
@@ -348,6 +453,46 @@ function M.run_remote(self, operation)
     if ok and not self.closed then
       self:refresh()
     end
+  end
+
+  console.process = remote_backend.run(self.root, operation, on_chunk, function(ok, result)
+    -- A first push from a fresh branch fails purely because no upstream is set.
+    -- Offering to set it here saves dropping to a shell for the common case.
+    if
+      ok
+      or operation ~= "push"
+      or self.closed
+      or not remote_backend.missing_upstream(table.concat(transcript))
+    then
+      settle(ok, result.code)
+      return
+    end
+    remote_backend.default_remote(self.root, function(remote, err)
+      if not remote then
+        console:append("\n" .. (err or "No remote is configured") .. "\n", "stderr")
+        settle(false, result.code)
+        return
+      end
+      local branch = self.status and self.status.branch or "HEAD"
+      vim.ui.select({ "Cancel", "Set upstream and push" }, {
+        prompt = ("%s has no upstream. Push and track %s/%s?"):format(branch, remote, branch),
+      }, function(choice)
+        if choice ~= "Set upstream and push" or self.closed then
+          settle(false, result.code)
+          return
+        end
+        console:append(("\n$ git push --set-upstream %s HEAD\n"):format(remote), "stdout")
+        console.running = true
+        console.process = remote_backend.push_set_upstream(
+          self.root,
+          remote,
+          on_chunk,
+          function(retry_ok, retry_result)
+            settle(retry_ok, retry_result.code)
+          end
+        )
+      end)
+    end)
   end)
 end
 

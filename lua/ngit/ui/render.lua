@@ -18,12 +18,22 @@ local function build(segments)
   return { text = text, spans = spans }
 end
 
+function M.section(title, count, group)
+  return build({
+    { " " .. title, group },
+    { "  " },
+    { tostring(count), "NgitMuted" },
+  })
+end
+
 function M.status(sign, path, group)
+  local directory, name = path:match("^(.*/)([^/]+)$")
   return build({
     { "  " },
     { sign, group },
     { " " },
-    { path, "NgitPath" },
+    { directory or "", "NgitPathDim" },
+    { name or path, "NgitPath" },
   })
 end
 

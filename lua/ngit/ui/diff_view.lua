@@ -14,6 +14,8 @@ local function line_group(kind)
     return "NgitDiffChange"
   elseif kind == "filler" then
     return "NgitDiffFiller"
+  elseif kind == "meta" then
+    return "NgitDiffMeta"
   elseif kind == "header" or kind == "hunk" then
     return "NgitDiffHeader"
   end
@@ -96,28 +98,23 @@ local function append(target, text, number, kind, hunk)
   end
 end
 
+--- The header window stays a fixed two lines. Author, date, commit message and
+--- diffstat used to be squeezed in here and silently cut off after four lines;
+--- they now lead the scrollable body instead, where their length does not
+--- shift the layout.
 local function header(diff, opts)
-  local lines = { sanitize(opts.title or "Diff") }
   local metadata = diff.metadata or {}
-  lines[#lines + 1] = ("%d file%s · +%d -%d%s"):format(
-    metadata.file_count or #(diff.files or {}),
-    (metadata.file_count or #(diff.files or {})) == 1 and "" or "s",
-    metadata.additions or 0,
-    metadata.deletions or 0,
-    diff.truncated and " · truncated" or ""
-  )
-  for _, value in ipairs(metadata.lines or {}) do
-    local cleaned = vim.trim(sanitize(value))
-    if
-      cleaned ~= ""
-      and #lines < 4
-      and not cleaned:match("^%d+ files? changed")
-      and not cleaned:match("^commit [0-9a-f]+$")
-    then
-      lines[#lines + 1] = cleaned
-    end
-  end
-  return lines
+  local count = metadata.file_count or #(diff.files or {})
+  return {
+    sanitize(opts.title or "Diff"),
+    ("%d file%s · +%d -%d%s"):format(
+      count,
+      count == 1 and "" or "s",
+      metadata.additions or 0,
+      metadata.deletions or 0,
+      diff.truncated and " · truncated" or ""
+    ),
+  }
 end
 
 function M.split(diff, opts)
@@ -129,6 +126,19 @@ function M.split(diff, opts)
     files = {},
     hunks = {},
   }
+
+  -- Everything git printed before the first patch header: author, date, the
+  -- full commit message, and the diffstat. Both panes carry it so the block
+  -- reads as one banner across a side-by-side view.
+  local preamble = (diff.metadata or {}).lines or {}
+  for _, line in ipairs(preamble) do
+    append(model.left, line, nil, "meta")
+    append(model.right, line, nil, "meta")
+  end
+  if #preamble > 0 then
+    append(model.left, "", nil, "meta")
+    append(model.right, "", nil, "meta")
+  end
 
   for _, file in ipairs(diff.files or {}) do
     local file_row = #model.left.lines + 1
@@ -257,7 +267,9 @@ function M.unified(diff, opts, split)
     end
     local left_group = left_line_groups[row]
     local right_group = right_line_groups[row]
-    if left_group == "NgitDiffHeader" then
+    if left_group == "NgitDiffMeta" then
+      append(unified, left, nil, "meta", hunk)
+    elseif left_group == "NgitDiffHeader" then
       append(unified, left, nil, "header", hunk)
       if file_rows[row] then
         unified.file_rows[#unified.file_rows + 1] = #unified.lines

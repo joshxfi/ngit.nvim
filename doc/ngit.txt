@@ -76,19 +76,23 @@ k               Select the previous item in the focused panel.
 dv              Toggle side-by-side and unified diff layouts.
 s               Stage the selected file, or current hunk in the diff.
 u               Unstage the selected file, or current hunk in the diff.
-X               Discard tracked worktree changes after confirmation.
+a               Stage every change. Applies in the Changes panel.
+A               Unstage every change. Applies in the Changes panel.
+X               Discard the selected change after confirmation. An unstaged
+                file returns to its staged content, a staged file returns to
+                HEAD, and an untracked file is deleted. Conflicts are refused.
 o               Open the selected file.
 /               Filter the file list.
 <Leader>e       Focus the file panel.
 0               Focus the selected diff.
-?               Show contextual help.
+?               Open the key sheet in a floating window.
 gs              Focus Changes.
 gl              Focus paginated Commits.
 gb              Focus local and remote Branches.
 gz              Focus Stashes.
 x               Switch branch, or copy a commit hash.
 n               Create a branch or stash.
-a               Apply the selected stash.
+a               Apply the selected stash. Applies in the Stashes panel.
 p               Pop the selected stash.
 D               Delete a merged local branch or drop a stash.
 L               Load another page of commits.
@@ -96,7 +100,9 @@ c               Create a commit in a gitcommit buffer.
 C               Amend HEAD in a gitcommit buffer.
 f               Fetch all remotes and prune stale refs.
 U               Pull with fast-forward-only semantics.
-P               Push normally. Force push is not exposed.
+P               Push normally. Force push is not exposed. When the branch has
+                no upstream, ngit offers to push with --set-upstream instead
+                of failing.
 co              Resolve the selected conflict with ours and stage it.
 ct              Resolve the selected conflict with theirs and stage it.
 gC              Continue an active merge, rebase, cherry-pick, or revert.
@@ -204,9 +210,15 @@ syntax highlighting is enabled when a preview contains one recognizable file
 type.
 
 Dashboard fields use NgitCommitHash, NgitCommitType, NgitDate, NgitDecoration,
-NgitBranchLocal, NgitBranchRemote, NgitUpstream, NgitStashRef, and NgitPath.
+NgitBranchLocal, NgitBranchRemote, NgitUpstream, NgitStashRef, NgitPath, and
+NgitPathDim for the leading directories of a path. Commit metadata above a
+patch uses NgitDiffMeta, and source line numbers use NgitLineNr.
 File markers use the foreground-only NgitStagedSign, NgitUnstagedSign,
-NgitUntrackedSign, and NgitConflictSign groups.
+NgitUntrackedSign, and NgitConflictSign groups; the matching section headings
+reuse them through NgitStaged, NgitUnstaged, NgitUntracked, and NgitConflict.
+Panel headers use NgitPanelActive, NgitPanelMarker, NgitPanelMarkerIdle, and
+NgitPanelCount, and the action bar uses NgitActionKey and NgitActionLabel.
+Unfocused panels dim their selection through NgitCursorLineIdle.
 All groups may be overridden after setup(). Theme-derived diff backgrounds are
 recomputed after :colorscheme while they remain ngit-owned; an explicit user
 override is preserved.
@@ -224,16 +236,31 @@ loaded. Changing panel focus does not reload collection data. Commit history is
 paginated. Rapid selection changes are debounced, superseded jobs are
 terminated, and recent previews are stored in a cache bounded by both entry
 count and estimated bytes. Oversized previews are displayed without caching.
-Each raw patch is parsed once into a semantic presentation model. Toggling
-between split and unified presentation does not run another Git command.
-Unified presentation is built lazily only when it is displayed. On narrow
-screens the preview falls back to unified mode; editor areas smaller than 40
-columns by 16 lines are rejected before any dashboard tab is created.
+Each raw patch is parsed once into a semantic presentation model, and the last
+few models are retained so moving back over a file redraws without rebuilding
+them. Toggling between split and unified presentation does not run another Git
+command. Unified presentation is built lazily only when it is displayed. On
+narrow screens the preview falls back to unified mode; editor areas smaller
+than 40 columns by 16 lines are rejected before any dashboard tab is created.
 
-Discard only restores tracked worktree files. ngit does not delete untracked
-files. Branch deletion uses Git's merged-only behavior, pull is
+Source line numbers are drawn through 'statuscolumn', so a patch costs nothing
+for the rows that are never displayed. Syntax highlighting is skipped for very
+large previews. Detecting an in-progress merge, rebase, cherry-pick, or revert
+stats the git directory instead of spawning a process per refresh, and writes
+outside the repository do not trigger one.
+
+Every discard is confirmed and states its exact effect, deleting an untracked
+file only when that is what was asked for. A file with unsaved changes in a
+loaded buffer is never overwritten, and buffers are rechecked after any
+mutation. Renames are acted on through both of their paths so no half-staged
+entry is left behind. Branch deletion uses Git's merged-only behavior, pull is
 fast-forward-only, and force push is not exposed. Remote progress appears in
 a cancellable floating console.
+
+Failures report what Git actually said. Several ordinary refusals arrive on
+standard output rather than standard error, so both are considered before
+falling back to an exit code. Committing checks for unresolved conflicts and
+an empty index before opening an editor.
 
 ==============================================================================
 vim:tw=78:ts=8:noet:ft=help:norl:

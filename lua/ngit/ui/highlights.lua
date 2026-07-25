@@ -4,15 +4,19 @@ local owned_derived = {}
 local linked_definitions = {
   NgitHeader = { link = "Title" },
   NgitPanelActive = { link = "Title" },
+  NgitPanelMarkerIdle = { link = "NonText" },
   NgitSection = { link = "Special" },
-  NgitStaged = { link = "DiffAdd" },
-  NgitUnstaged = { link = "DiffChange" },
-  NgitUntracked = { link = "DiagnosticInfo" },
-  NgitConflict = { link = "DiagnosticError" },
+  -- Section headings share the accent of the file markers they introduce. They
+  -- are foreground-only so the heading reads as a label, not a filled bar.
+  NgitStaged = { link = "NgitStagedSign" },
+  NgitUnstaged = { link = "NgitUnstagedSign" },
+  NgitUntracked = { link = "NgitUntrackedSign" },
+  NgitConflict = { link = "NgitConflictSign" },
   NgitSuccess = { link = "DiagnosticOk" },
   NgitFailure = { link = "DiagnosticError" },
   NgitDiffFiller = { link = "NonText" },
   NgitDiffHeader = { link = "Title" },
+  NgitDiffMeta = { link = "Comment" },
   NgitCommitHash = { link = "Number" },
   NgitCommitType = { link = "Type" },
   NgitDate = { link = "Comment" },
@@ -24,6 +28,7 @@ local linked_definitions = {
   NgitPath = { link = "Directory" },
   NgitStatusline = { link = "StatusLineNC" },
   NgitMuted = { link = "Comment" },
+  NgitLineNr = { link = "LineNr" },
 }
 
 local function color(name, attribute, fallback)
@@ -52,7 +57,16 @@ local function derived_definitions()
   local blue = color("DiagnosticInfo", "fg", 0x61afef)
   local line_amount = vim.o.background == "light" and 0.2 or 0.3
   local text_amount = vim.o.background == "light" and 0.38 or 0.52
+  local cursor_line = color("CursorLine", "bg", blend(background, blue, 0.12))
   return {
+    -- Inactive panels keep a selection marker so the cursor position is not
+    -- lost, but it recedes so only one panel reads as focused.
+    NgitCursorLineIdle = { bg = blend(background, cursor_line, 0.45) },
+    NgitPanelMarker = { fg = blue, bold = true },
+    NgitPanelCount = { fg = blue },
+    NgitPathDim = { fg = blend(background, color("Comment", "fg", 0x7a7a8c), 0.85) },
+    NgitActionKey = { fg = yellow, bold = true },
+    NgitActionLabel = { fg = color("Normal", "fg", 0xc8c8d4) },
     NgitStagedSign = { fg = green, bold = true },
     NgitUnstagedSign = { fg = yellow, bold = true },
     NgitUntrackedSign = { fg = blue, bold = true },
