@@ -191,7 +191,8 @@ auto_refresh
         events reload every repository collection.
 
 confirm_discard
-        Ask before restoring tracked worktree changes.
+        Ask before discarding. The prompt names the exact effect, which
+        depends on the section the file is selected in.
 
 signs
         Text displayed for each file state.
