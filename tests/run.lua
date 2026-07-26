@@ -1619,10 +1619,15 @@ test("the diff gutter draws numbers for a window that is not the current one", f
   truthy(added:find("12", 1, true), "missing source number, got " .. vim.inspect(added))
   truthy(added:find("NgitDiffAddNumber", 1, true), added)
   vim.v.lnum = 3
-  truthy(gutter.render():find("NgitDiffDeleteNumber", 1, true))
+  local deleted = gutter.render()
+  truthy(deleted:find("NgitDiffDeleteNumber", 1, true))
+
+  -- The tinted number carries the side, so no +/- marker is drawn.
+  truthy(not added:find("+", 1, true), "unexpected marker: " .. added)
+  truthy(not deleted:find("-", 1, true), "unexpected marker: " .. deleted)
 
   -- Two-digit numbers must not reserve room for five.
-  equal(4, gutter.width(buffer))
+  equal(3, gutter.width(buffer))
   vim.v.lnum = 2
   equal(gutter.width(buffer), #gutter.render())
 
@@ -1649,10 +1654,10 @@ test("the gutter reserves only as many columns as the numbers need", function()
     return width
   end
 
-  equal(4, width_for(7))
-  equal(4, width_for(99))
-  equal(5, width_for(100))
-  equal(6, width_for(4000))
+  equal(3, width_for(7))
+  equal(3, width_for(99))
+  equal(4, width_for(100))
+  equal(5, width_for(4000))
 
   -- A pane with no numbered rows at all, such as a metadata-only preview,
   -- must not indent every line by an empty column.

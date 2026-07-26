@@ -54,9 +54,10 @@ function M.attach(buffer, model, shared_digits)
   end
   panes[buffer] = {
     model = model,
-    -- "%#Group#" carries no display width, so a row is digits + marker + space.
-    format = "%%#%s#%" .. digits .. "d%s ",
-    blank = string.rep(" ", digits + 2),
+    -- "%#Group#" carries no display width, so a row is the number plus the one
+    -- space separating it from the text.
+    format = "%%#%s#%" .. digits .. "d ",
+    blank = string.rep(" ", digits + 1),
   }
 end
 
@@ -93,13 +94,15 @@ function M.render()
   if not number then
     return pane.blank
   end
+  -- No +/- marker: the number cell carries the row's own accent and sits
+  -- against the tinted line, which already says which side it belongs to.
   local kind = pane.model.source_kinds[vim.v.lnum]
   if kind == "add" then
-    return pane.format:format("NgitDiffAddNumber", number, "+")
+    return pane.format:format("NgitDiffAddNumber", number)
   elseif kind == "delete" then
-    return pane.format:format("NgitDiffDeleteNumber", number, "-")
+    return pane.format:format("NgitDiffDeleteNumber", number)
   end
-  return pane.format:format("NgitLineNr", number, "│")
+  return pane.format:format("NgitLineNr", number)
 end
 
 return M

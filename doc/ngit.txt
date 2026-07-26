@@ -205,7 +205,8 @@ mappings
 
 Diff lines use NgitDiffAdd, NgitDiffDelete, and NgitDiffChange. Changed text
 within a line uses NgitDiffAddText, NgitDiffDeleteText, or NgitDiffText.
-NgitDiffAddNumber and NgitDiffDeleteNumber color source line-number markers.
+NgitDiffAddNumber and NgitDiffDeleteNumber color the source line numbers beside
+added and removed rows; no +/- marker is drawn, as the tint carries the side.
 Headers and alignment rows use NgitDiffHeader and NgitDiffFiller. Source
 syntax highlighting is enabled when a preview contains one recognizable file
 type.

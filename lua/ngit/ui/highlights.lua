@@ -14,7 +14,6 @@ local linked_definitions = {
   NgitConflict = { link = "NgitConflictSign" },
   NgitSuccess = { link = "DiagnosticOk" },
   NgitFailure = { link = "DiagnosticError" },
-  NgitDiffFiller = { link = "NonText" },
   NgitDiffHeader = { link = "Title" },
   NgitDiffMeta = { link = "Comment" },
   NgitCommitHash = { link = "Number" },
@@ -58,7 +57,11 @@ local function derived_definitions()
   local line_amount = vim.o.background == "light" and 0.2 or 0.3
   local text_amount = vim.o.background == "light" and 0.38 or 0.52
   local cursor_line = color("CursorLine", "bg", blend(background, blue, 0.12))
+  local muted = color("NonText", "fg", color("Comment", "fg", 0x7a7a8c))
   return {
+    -- A row the other side does not have. Without a tint it is indistinguishable
+    -- from a genuine blank line, which misreads an alignment gap as content.
+    NgitDiffFiller = { fg = muted, bg = blend(background, muted, 0.13) },
     -- Inactive panels keep a selection marker so the cursor position is not
     -- lost, but it recedes so only one panel reads as focused.
     NgitCursorLineIdle = { bg = blend(background, cursor_line, 0.45) },
