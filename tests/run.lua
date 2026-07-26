@@ -955,6 +955,317 @@ test("a hunk can be staged from the structured new-side preview", function()
   require("ngit").setup()
 end)
 
+test("hunk extraction uses the enclosing file header in a multi-file diff", function()
+  local diff = require("ngit.git.diff")
+  local lines = {
+    "commit abcdef",
+    "Author: someone <someone@example.test>",
+    "",
+    "    subject line",
+    "",
+    "diff --git a/one b/one",
+    "--- a/one",
+    "+++ b/one",
+    "@@ -1 +1 @@",
+    "-one",
+    "+ONE",
+    "diff --git a/two b/two",
+    "--- a/two",
+    "+++ b/two",
+    "@@ -5 +5 @@",
+    "-two",
+    "+TWO",
+  }
+  local second = assert(diff.patch_at_hunk(lines, 15))
+  truthy(second:find("a/two b/two", 1, true), "second hunk lost its own header")
+  truthy(not second:find("a/one b/one", 1, true), "second hunk borrowed the first file's header")
+  truthy(not second:find("Author:", 1, true), "commit preamble leaked into the patch")
+
+  local first = assert(diff.patch_at_hunk(lines, 9))
+  truthy(first:find("a/one b/one", 1, true))
+  truthy(not first:find("+TWO", 1, true))
+end)
+
+test("a line selection narrows a hunk the way git add -p splits one", function()
+  local diff = require("ngit.git.diff")
+  local lines = {
+    "diff --git a/file b/file",
+    "--- a/file",
+    "+++ b/file",
+    "@@ -1,4 +1,4 @@",
+    " keep",
+    "-old one",
+    "+new one",
+    "-old two",
+    "+new two",
+    " tail",
+  }
+  local function body(patch)
+    return vim.split((patch:gsub("\n$", "")), "\n", { plain = true })
+  end
+
+  -- Staging: the target holds the old side, so an unselected removal has to stay
+  -- as context and an unselected addition must not appear at all.
+  equal({
+    "diff --git a/file b/file",
+    "--- a/file",
+    "+++ b/file",
+    "@@ -1,4 +1,4 @@",
+    " keep",
+    " old one",
+    "-old two",
+    "+new two",
+    " tail",
+  }, body(assert(diff.patch_for_rows(lines, { [8] = true, [9] = true }, {}))))
+
+  -- Unstaging the same rows: the target holds the new side, so the two swap.
+  equal({
+    "diff --git a/file b/file",
+    "--- a/file",
+    "+++ b/file",
+    "@@ -1,4 +1,4 @@",
+    " keep",
+    " new one",
+    "-old two",
+    "+new two",
+    " tail",
+  }, body(assert(diff.patch_for_rows(lines, { [8] = true, [9] = true }, { reverse = true }))))
+
+  equal(nil, diff.patch_for_rows(lines, {}, {}))
+end)
+
+test("a line selection spanning two files keeps one header for each", function()
+  local diff = require("ngit.git.diff")
+  local lines = {
+    "diff --git a/one b/one",
+    "--- a/one",
+    "+++ b/one",
+    "@@ -1 +1 @@",
+    "-one",
+    "+ONE",
+    "diff --git a/two b/two",
+    "--- a/two",
+    "+++ b/two",
+    "@@ -1 +1 @@",
+    "-two",
+    "+TWO",
+  }
+  local patch =
+    assert(diff.patch_for_rows(lines, { [5] = true, [6] = true, [11] = true, [12] = true }, {}))
+  local rows = vim.split((patch:gsub("\n$", "")), "\n", { plain = true })
+  equal({
+    "diff --git a/one b/one",
+    "--- a/one",
+    "+++ b/one",
+    "@@ -1,1 +1,1 @@",
+    "-one",
+    "+ONE",
+    "diff --git a/two b/two",
+    "--- a/two",
+    "+++ b/two",
+    "@@ -1,1 +1,1 @@",
+    "-two",
+    "+TWO",
+  }, rows)
+
+  -- Picking only the addition of a change pair leaves the removal behind as
+  -- context, which is what makes the new line an insertion rather than a
+  -- replacement. The recounted header has to say so.
+  local addition_only = assert(diff.patch_for_rows(lines, { [6] = true }, {}))
+  truthy(addition_only:find("@@ -1,1 +1,2 @@", 1, true), "the narrowed header was not recounted")
+end)
+
+test("narrowing re-pairs a change block git printed as removals then additions", function()
+  local diff = require("ngit.git.diff")
+  -- What `git diff` actually emits for a three-line file whose every line
+  -- changed: one run of removals followed by one run of additions.
+  local lines = {
+    "diff --git a/file b/file",
+    "--- a/file",
+    "+++ b/file",
+    "@@ -1,3 +1,3 @@",
+    "-a",
+    "-b",
+    "-c",
+    "+A",
+    "+B",
+    "+C",
+  }
+  local patch = assert(diff.patch_for_rows(lines, { [6] = true, [9] = true }, {}))
+  equal({
+    "diff --git a/file b/file",
+    "--- a/file",
+    "+++ b/file",
+    "@@ -1,3 +1,3 @@",
+    " a",
+    "-b",
+    "+B",
+    " c",
+  }, vim.split((patch:gsub("\n$", "")), "\n", { plain = true }))
+end)
+
+test("splitting a whole-file addition is refused rather than left to git", function()
+  local diff = require("ngit.git.diff")
+  local lines = {
+    "diff --git a/new b/new",
+    "new file mode 100644",
+    "--- /dev/null",
+    "+++ b/new",
+    "@@ -0,0 +1,2 @@",
+    "+first",
+    "+second",
+  }
+  local patch, err = diff.patch_for_rows(lines, { [6] = true }, { reverse = true })
+  equal(nil, patch)
+  truthy(err and err:find("Whole%-file"), "partial reverse of a creation was not explained")
+
+  -- Forward it is an ordinary partial stage, which git handles.
+  truthy(diff.patch_for_rows(lines, { [6] = true }, {}))
+end)
+
+test("a line selection stages only the rows the reader picked", function()
+  local root = repository()
+  write_file(vim.fs.joinpath(root, "lines.txt"), "a\nb\nc\n")
+  git(root, { "add", "lines.txt" })
+  git(root, { "commit", "-q", "-m", "initial" })
+  write_file(vim.fs.joinpath(root, "lines.txt"), "A\nB\nC\n")
+
+  local diff_backend = require("ngit.git.diff")
+  local diff = wait_for(function(done)
+    diff_backend.load(root, "unstaged", "lines.txt", 3, 10000, done)
+  end)
+  local selected = {}
+  for index, line in ipairs(diff.lines) do
+    if line == "-b" or line == "+B" then
+      selected[index] = true
+    end
+  end
+  equal(2, vim.tbl_count(selected))
+
+  local patch = assert(diff_backend.patch_for_rows(diff.lines, selected, {}))
+  local ok, err = wait_for(function(done)
+    require("ngit.git.mutate").apply(root, patch, { target = "index" }, done)
+  end)
+  equal(true, ok)
+  equal(nil, err)
+
+  local cached = git(root, { "diff", "--cached", "--", "lines.txt" }).stdout
+  truthy(cached:find("+B", 1, true), "the picked line was not staged")
+  truthy(not cached:find("+A", 1, true), "an unpicked line was staged")
+  truthy(not cached:find("+C", 1, true), "an unpicked line was staged")
+  equal("a\nB\nc\n", git(root, { "show", ":lines.txt" }).stdout)
+end)
+
+test("discarding a hunk restores only that hunk in the worktree", function()
+  local root = repository()
+  local original = {}
+  for index = 1, 30 do
+    original[index] = ("line %02d"):format(index)
+  end
+  write_file(vim.fs.joinpath(root, "hunks.txt"), table.concat(original, "\n") .. "\n")
+  git(root, { "add", "hunks.txt" })
+  git(root, { "commit", "-q", "-m", "initial" })
+
+  local changed = vim.deepcopy(original)
+  changed[2] = "changed near start"
+  changed[29] = "changed near end"
+  write_file(vim.fs.joinpath(root, "hunks.txt"), table.concat(changed, "\n") .. "\n")
+
+  local diff_backend = require("ngit.git.diff")
+  local diff = wait_for(function(done)
+    diff_backend.load(root, "unstaged", "hunks.txt", 3, 10000, done)
+  end)
+  equal(2, #diff.hunks)
+  local patch = assert(diff_backend.patch_at_hunk(diff.lines, diff.hunks[1]))
+  local ok, err = wait_for(function(done)
+    require("ngit.git.mutate").apply(root, patch, { reverse = true, target = "worktree" }, done)
+  end)
+  equal(true, ok)
+  equal(nil, err)
+
+  local content = read_file(vim.fs.joinpath(root, "hunks.txt"))
+  truthy(not content:find("changed near start", 1, true), "the discarded hunk survived")
+  truthy(content:find("changed near end", 1, true), "an untouched hunk was discarded too")
+end)
+
+test("a visual selection in the Changes panel stages every file it covers", function()
+  local root = repository()
+  git(root, { "commit", "-q", "--allow-empty", "-m", "initial" })
+  for _, name in ipairs({ "one.txt", "two.txt", "three.txt" }) do
+    write_file(vim.fs.joinpath(root, name), name .. "\n")
+  end
+
+  require("ngit").open({ cwd = root })
+  truthy(vim.wait(10000, function()
+    local session = require("ngit")._active_session()
+    return session and session.status and #session.panels.status.entries == 3
+  end, 10))
+  local session = require("ngit")._active_session()
+  local panel = session.dashboard.panels.status
+  vim.api.nvim_set_current_win(panel.window)
+  vim.api.nvim_win_set_cursor(panel.window, { session.panels.status.entries[1].row, 0 })
+  -- Drives the installed visual-mode mapping rather than the method, so the
+  -- selection is read the same way a keypress would produce it.
+  vim.api.nvim_feedkeys("Vjs", "x", false)
+
+  truthy(
+    vim.wait(10000, function()
+      local staged = git(root, { "diff", "--cached", "--name-only" }).stdout
+      return select(2, staged:gsub("\n", "\n")) == 2
+    end, 10),
+    "the visual selection did not stage exactly the covered files"
+  )
+  local staged = git(root, { "diff", "--cached", "--name-only" }).stdout
+  truthy(staged:find("one.txt", 1, true))
+  truthy(staged:find("three.txt", 1, true))
+  truthy(not staged:find("two.txt", 1, true), "a file outside the selection was staged")
+  require("ngit").close()
+end)
+
+test("opening a file from the diff lands on the reviewed line", function()
+  local root = repository()
+  local original = {}
+  for index = 1, 20 do
+    original[index] = ("line %02d"):format(index)
+  end
+  write_file(vim.fs.joinpath(root, "jump.txt"), table.concat(original, "\n") .. "\n")
+  git(root, { "add", "jump.txt" })
+  git(root, { "commit", "-q", "-m", "initial" })
+  local changed = vim.deepcopy(original)
+  changed[12] = "the reviewed line"
+  write_file(vim.fs.joinpath(root, "jump.txt"), table.concat(changed, "\n") .. "\n")
+
+  require("ngit").setup({ diff_layout = "unified" })
+  require("ngit").open({ cwd = root })
+  truthy(vim.wait(10000, function()
+    local session = require("ngit")._active_session()
+    return session and session.current_diff_models and session.current_diff_models.unified
+  end, 10))
+  local session = require("ngit")._active_session()
+  session.dashboard:focus_preview()
+  local pane = session.current_diff_models.unified.unified
+  local target
+  for row, kind in pairs(pane.source_kinds) do
+    if kind == "add" and pane.source_numbers[row] == 12 then
+      target = row
+    end
+  end
+  truthy(target, "the changed row was not found in the preview")
+
+  local path, line = nil, nil
+  vim.api.nvim_win_set_cursor(session.dashboard.preview.unified.window, { target, 0 })
+  path, line = session:preview_location()
+  equal("jump.txt", path)
+  equal(12, line)
+
+  session:open_file()
+  truthy(vim.wait(10000, function()
+    return vim.api.nvim_buf_get_name(0):find("jump.txt", 1, true) ~= nil
+  end, 10))
+  equal(12, vim.api.nvim_win_get_cursor(0)[1])
+  require("ngit").setup()
+end)
+
 test("session renders a real repository and closes cleanly", function()
   local root = repository()
   write_file(vim.fs.joinpath(root, "visible.txt"), "hello\n")
@@ -1870,6 +2181,949 @@ test("help opens as a grouped float that closes on q", function()
   vim.api.nvim_set_current_win(window)
   vim.api.nvim_feedkeys("q", "x", false)
   equal(false, vim.api.nvim_win_is_valid(window))
+end)
+
+test("tags appear as refs of their own and report the commit they name", function()
+  local root = repository()
+  write_file(vim.fs.joinpath(root, "tagged.txt"), "one\n")
+  git(root, { "add", "tagged.txt" })
+  git(root, { "commit", "-q", "-m", "first" })
+  local head = vim.trim(git(root, { "rev-parse", "HEAD" }).stdout)
+
+  local branch_backend = require("ngit.git.branch")
+  local lightweight = wait_for(function(done)
+    branch_backend.create_tag(root, "v0-light", "HEAD", nil, done)
+  end)
+  equal(true, lightweight)
+  local annotated, annotate_err = wait_for(function(done)
+    branch_backend.create_tag(root, "v1", "HEAD", "release one", done)
+  end)
+  equal(true, annotated)
+  equal(nil, annotate_err)
+
+  local refs = wait_for(function(done)
+    branch_backend.list(root, done)
+  end)
+  local by_name = {}
+  for _, ref in ipairs(refs) do
+    by_name[ref.name] = ref
+  end
+  truthy(by_name["v1"], "the annotated tag is missing from the ref list")
+  equal("tag", by_name["v1"].scope)
+  equal(true, by_name["v1"].tag)
+  -- An annotated tag's own object name is not the commit, so the peeled name is
+  -- what a diff or a checkout has to use.
+  equal(head, by_name["v1"].oid)
+  equal(head, by_name["v0-light"].oid)
+  equal("local", by_name["main"].scope)
+
+  local dropped = wait_for(function(done)
+    branch_backend.delete_tag(root, "v0-light", done)
+  end)
+  equal(true, dropped)
+  truthy(not git(root, { "tag", "--list" }).stdout:find("v0%-light"))
+end)
+
+test("branches can be renamed and given or stripped of an upstream", function()
+  local root = repository()
+  git(root, { "commit", "-q", "--allow-empty", "-m", "initial" })
+  local branch_backend = require("ngit.git.branch")
+
+  local created = wait_for(function(done)
+    branch_backend.create(root, "topic", nil, done)
+  end)
+  equal(true, created)
+  local renamed, rename_err = wait_for(function(done)
+    branch_backend.rename(root, "topic", "topic/renamed", done)
+  end)
+  equal(true, renamed)
+  equal(nil, rename_err)
+  truthy(git(root, { "branch", "--list", "topic/renamed" }).stdout:find("topic/renamed", 1, true))
+
+  local tracked, track_err = wait_for(function(done)
+    branch_backend.set_upstream(root, "topic/renamed", "main", done)
+  end)
+  equal(true, tracked)
+  equal(nil, track_err)
+  equal(
+    "main",
+    vim.trim(git(root, { "rev-parse", "--abbrev-ref", "topic/renamed@{upstream}" }).stdout)
+  )
+
+  local cleared = wait_for(function(done)
+    branch_backend.set_upstream(root, "topic/renamed", nil, done)
+  end)
+  equal(true, cleared)
+  local after = git(root, {
+    "rev-parse",
+    "--abbrev-ref",
+    "topic/renamed@{upstream}",
+  }, { accept = { [128] = true } })
+  truthy(after.code ~= 0, "the upstream survived being unset")
+
+  equal("origin", (branch_backend.split_remote("origin/topic/renamed")))
+  equal("topic/renamed", select(2, branch_backend.split_remote("origin/topic/renamed")))
+end)
+
+test("a commit can be reverted and reset onto", function()
+  local root = repository()
+  write_file(vim.fs.joinpath(root, "revert.txt"), "keep\n")
+  git(root, { "add", "revert.txt" })
+  git(root, { "commit", "-q", "-m", "base" })
+  local base = vim.trim(git(root, { "rev-parse", "HEAD" }).stdout)
+  write_file(vim.fs.joinpath(root, "revert.txt"), "keep\nregret\n")
+  git(root, { "commit", "-q", "-am", "add regret" })
+  local regret = vim.trim(git(root, { "rev-parse", "HEAD" }).stdout)
+
+  local reverted, revert_err = wait_for(function(done)
+    require("ngit.git.sequencer").start(root, "revert", regret, done)
+  end)
+  equal(true, reverted)
+  equal(nil, revert_err)
+  equal("keep\n", read_file(vim.fs.joinpath(root, "revert.txt")))
+  truthy(git(root, { "log", "-1", "--format=%s" }).stdout:find("Revert", 1, true))
+
+  local reset, reset_err = wait_for(function(done)
+    require("ngit.git.mutate").reset(root, "hard", base, done)
+  end)
+  equal(true, reset)
+  equal(nil, reset_err)
+  equal(base, vim.trim(git(root, { "rev-parse", "HEAD" }).stdout))
+end)
+
+test("an interactive rebase plan drops and reorders the commits it names", function()
+  local root = repository()
+  git(root, { "commit", "-q", "--allow-empty", "-m", "base" })
+  for _, name in ipairs({ "one", "two", "three" }) do
+    write_file(vim.fs.joinpath(root, name .. ".txt"), name .. "\n")
+    git(root, { "add", name .. ".txt" })
+    git(root, { "commit", "-q", "-m", name })
+  end
+
+  local sequencer = require("ngit.git.sequencer")
+  local steps, todo_err = wait_for(function(done)
+    sequencer.rebase_todo(root, "HEAD~3", done)
+  end)
+  equal(nil, todo_err)
+  equal(3, #steps)
+  -- Oldest first, which is the order git's todo list is read in.
+  equal("one", steps[1].subject)
+  equal("three", steps[3].subject)
+
+  -- A reword becomes a pick plus a break, so the rebase stops with the commit at
+  -- HEAD where the ordinary amend action can reach it.
+  equal(
+    {
+      "pick " .. steps[1].oid .. " one",
+      "pick " .. steps[2].oid .. " two",
+      "break",
+      "drop " .. steps[3].oid .. " three",
+    },
+    sequencer.todo_lines({
+      { action = "pick", oid = steps[1].oid, subject = "one" },
+      { action = "reword", oid = steps[2].oid, subject = "two" },
+      { action = "drop", oid = steps[3].oid, subject = "three" },
+    })
+  )
+
+  steps[2].action = "drop"
+  local ok, err = wait_for(function(done)
+    sequencer.rebase_with_todo(root, "HEAD~3", steps, done)
+  end)
+  equal(true, ok, err)
+  local subjects = git(root, { "log", "--format=%s", "-3" }).stdout
+  truthy(subjects:find("three", 1, true), "the kept commits did not survive")
+  truthy(not subjects:find("two", 1, true), "the dropped commit survived")
+end)
+
+test("autosquash folds a fixup commit into the one it names", function()
+  local root = repository()
+  git(root, { "commit", "-q", "--allow-empty", "-m", "base" })
+  write_file(vim.fs.joinpath(root, "squash.txt"), "first\n")
+  git(root, { "add", "squash.txt" })
+  git(root, { "commit", "-q", "-m", "feature" })
+  local target = vim.trim(git(root, { "rev-parse", "HEAD" }).stdout)
+
+  write_file(vim.fs.joinpath(root, "squash.txt"), "first\nsecond\n")
+  git(root, { "add", "squash.txt" })
+  local committed, commit_err = wait_for(function(done)
+    require("ngit.git.mutate").commit(root, "", { fixup = target }, done)
+  end)
+  equal(true, committed)
+  equal(nil, commit_err)
+  equal(3, tonumber(vim.trim(git(root, { "rev-list", "--count", "HEAD" }).stdout)))
+
+  local ok, err = wait_for(function(done)
+    require("ngit.git.sequencer").rebase_autosquash(root, "HEAD~2", done)
+  end)
+  equal(true, ok, err)
+  equal(2, tonumber(vim.trim(git(root, { "rev-list", "--count", "HEAD" }).stdout)))
+  equal("first\nsecond\n", read_file(vim.fs.joinpath(root, "squash.txt")))
+end)
+
+test("stash variants keep the index, take the staged half, and name paths", function()
+  local root = repository()
+  write_file(vim.fs.joinpath(root, "kept.txt"), "one\n")
+  write_file(vim.fs.joinpath(root, "other.txt"), "one\n")
+  git(root, { "add", "." })
+  git(root, { "commit", "-q", "-m", "initial" })
+
+  local stash_backend = require("ngit.git.stash")
+  write_file(vim.fs.joinpath(root, "kept.txt"), "two\n")
+  git(root, { "add", "kept.txt" })
+  write_file(vim.fs.joinpath(root, "other.txt"), "two\n")
+
+  local ok, err = wait_for(function(done)
+    stash_backend.push(root, "keeping the index", { keep_index = true }, done)
+  end)
+  equal(true, ok, err)
+  -- --keep-index leaves the staged content in place, which is the whole point:
+  -- the build can run against exactly what is about to be committed.
+  truthy(git(root, { "diff", "--cached", "--name-only" }).stdout:find("kept.txt", 1, true))
+
+  local stashes = wait_for(function(done)
+    stash_backend.list(root, done)
+  end)
+  equal(1, #stashes)
+  local applied, apply_err = wait_for(function(done)
+    stash_backend.apply(root, stashes[1], { index = true }, done)
+  end)
+  -- Applying over content the stash already restored can conflict; either way the
+  -- call has to report rather than throw.
+  truthy(applied == true or apply_err ~= nil)
+
+  git(root, { "checkout", "--", "." })
+  git(root, { "stash", "clear" })
+  write_file(vim.fs.joinpath(root, "kept.txt"), "three\n")
+  local by_path, path_err = wait_for(function(done)
+    stash_backend.push(root, "one path only", { paths = { "kept.txt" } }, done)
+  end)
+  equal(true, by_path, path_err)
+  equal("one\n", read_file(vim.fs.joinpath(root, "kept.txt")))
+end)
+
+test("conflict markers are parsed and one block at a time can take a side", function()
+  local conflict = require("ngit.git.conflict")
+  local lines = {
+    "before",
+    "<<<<<<< HEAD",
+    "ours one",
+    "=======",
+    "theirs one",
+    ">>>>>>> topic",
+    "between",
+    "<<<<<<< HEAD",
+    "ours two",
+    "=======",
+    "theirs two",
+    ">>>>>>> topic",
+    "after",
+  }
+  local blocks = conflict.parse_markers(lines)
+  equal(2, #blocks)
+  equal(2, blocks[1].start)
+  equal(6, blocks[1].finish)
+  equal("HEAD", blocks[1].ours_label)
+  equal("topic", blocks[1].theirs_label)
+
+  equal({
+    "before",
+    "ours one",
+    "between",
+    "<<<<<<< HEAD",
+    "ours two",
+    "=======",
+    "theirs two",
+    ">>>>>>> topic",
+    "after",
+  }, conflict.resolve_lines(lines, { blocks[1] }, "ours"))
+
+  equal({
+    "before",
+    "ours one",
+    "theirs one",
+    "between",
+    "ours two",
+    "theirs two",
+    "after",
+  }, conflict.resolve_lines(lines, blocks, "both"))
+
+  -- diff3 style puts the common ancestor between ||||||| and =======, and "ours"
+  -- has to stop at the first of the two.
+  local diff3 = {
+    "<<<<<<< HEAD",
+    "ours",
+    "||||||| base",
+    "original",
+    "=======",
+    "theirs",
+    ">>>>>>> topic",
+  }
+  local diff3_blocks = conflict.parse_markers(diff3)
+  equal(1, #diff3_blocks)
+  equal(3, diff3_blocks[1].base)
+  equal({ "ours" }, conflict.resolve_lines(diff3, diff3_blocks, "ours"))
+end)
+
+test("a real conflict can be resolved one block at a time and then staged", function()
+  local root = repository()
+  local base = { "one", "two", "three", "four", "five", "six", "seven", "eight", "nine" }
+  write_file(vim.fs.joinpath(root, "both.txt"), table.concat(base, "\n") .. "\n")
+  git(root, { "add", "both.txt" })
+  git(root, { "commit", "-q", "-m", "base" })
+
+  git(root, { "switch", "-q", "-c", "topic" })
+  local theirs = vim.deepcopy(base)
+  theirs[1] = "theirs first"
+  theirs[9] = "theirs last"
+  write_file(vim.fs.joinpath(root, "both.txt"), table.concat(theirs, "\n") .. "\n")
+  git(root, { "commit", "-q", "-am", "topic edits" })
+
+  git(root, { "switch", "-q", "main" })
+  local ours = vim.deepcopy(base)
+  ours[1] = "ours first"
+  ours[9] = "ours last"
+  write_file(vim.fs.joinpath(root, "both.txt"), table.concat(ours, "\n") .. "\n")
+  git(root, { "commit", "-q", "-am", "main edits" })
+  git(root, { "merge", "topic" }, { accept = { [1] = true } })
+
+  local conflict = require("ngit.git.conflict")
+  local blocks = assert(conflict.blocks(root, "both.txt"))
+  equal(2, #blocks)
+
+  -- Resolving only the first block leaves the file conflicted, so it must not be
+  -- staged yet: doing so would mark the merge resolved with markers still in it.
+  local ok, err = wait_for(function(done)
+    conflict.resolve(root, "both.txt", "ours", blocks[1].start, done)
+  end)
+  equal(true, ok, err)
+  local partial = read_file(vim.fs.joinpath(root, "both.txt"))
+  truthy(partial:find("ours first", 1, true))
+  truthy(not partial:find("theirs first", 1, true))
+  truthy(partial:find("<<<<<<<", 1, true), "the second conflict was resolved too")
+  truthy(
+    git(root, { "diff", "--name-only", "--diff-filter=U" }).stdout:find("both.txt", 1, true),
+    "the file was staged while still conflicted"
+  )
+
+  local remaining = assert(conflict.blocks(root, "both.txt"))
+  local second, second_err = wait_for(function(done)
+    conflict.resolve(root, "both.txt", "theirs", remaining[1].start, done)
+  end)
+  equal(true, second, second_err)
+  local resolved = read_file(vim.fs.joinpath(root, "both.txt"))
+  truthy(resolved:find("theirs last", 1, true))
+  truthy(not resolved:find("<<<<<<<", 1, true))
+  equal("", git(root, { "diff", "--name-only", "--diff-filter=U" }).stdout)
+end)
+
+test("a revision range lists its files and diffs each of them", function()
+  local root = repository()
+  write_file(vim.fs.joinpath(root, "kept.txt"), "base\n")
+  git(root, { "add", "kept.txt" })
+  git(root, { "commit", "-q", "-m", "base" })
+
+  git(root, { "switch", "-q", "-c", "feature" })
+  write_file(vim.fs.joinpath(root, "kept.txt"), "changed\n")
+  write_file(vim.fs.joinpath(root, "added.txt"), "new\n")
+  git(root, { "add", "." })
+  git(root, { "commit", "-q", "-m", "feature work" })
+  -- A change on the base that the range must not report.
+  git(root, { "switch", "-q", "main" })
+  write_file(vim.fs.joinpath(root, "elsewhere.txt"), "unrelated\n")
+  git(root, { "add", "elsewhere.txt" })
+  git(root, { "commit", "-q", "-m", "unrelated" })
+  git(root, { "switch", "-q", "feature" })
+
+  local range = require("ngit.git.range")
+  local files, err = wait_for(function(done)
+    range.files(root, "main...HEAD", done)
+  end)
+  equal(nil, err)
+  local by_path = {}
+  for _, file in ipairs(files) do
+    by_path[file.path] = file
+  end
+  equal(2, #files)
+  equal("modified", by_path["kept.txt"].kind)
+  equal("added", by_path["added.txt"].kind)
+  truthy(by_path["elsewhere.txt"] == nil, "the three-dot range reported a change made on the base")
+
+  local diff = wait_for(function(done)
+    range.diff(root, "main...HEAD", "kept.txt", 3, 10000, done)
+  end)
+  truthy(diff.text:find("+changed", 1, true))
+
+  local spec, spec_err = wait_for(function(done)
+    range.review_spec(root, done)
+  end)
+  -- Without an upstream or an origin, the default branch is the base.
+  equal(nil, spec_err)
+  equal("main...HEAD", spec)
+
+  local valid = wait_for(function(done)
+    range.validate(root, "main...HEAD", done)
+  end)
+  equal(true, valid)
+  local invalid = wait_for(function(done)
+    range.validate(root, "no-such-ref...HEAD", done)
+  end)
+  equal(false, invalid)
+end)
+
+test("name-status parsing keeps rename pairs and their scores apart", function()
+  local range = require("ngit.git.range")
+  local files = range.parse(
+    table.concat(
+      { "M", "kept.txt", "R100", "old name.txt", "new name.txt", "A", "added.txt" },
+      "\0"
+    ) .. "\0"
+  )
+  equal(3, #files)
+  equal("modified", files[1].kind)
+  equal("renamed", files[2].kind)
+  equal("old name.txt", files[2].old_path)
+  equal("new name.txt", files[2].path)
+  equal("added.txt", files[3].path)
+end)
+
+test("blame annotates a real file and reports one header per commit", function()
+  local root = repository()
+  write_file(vim.fs.joinpath(root, "blamed.txt"), "first\nsecond\n")
+  git(root, { "add", "blamed.txt" })
+  git(root, { "commit", "-q", "-m", "first commit" })
+  local first = vim.trim(git(root, { "rev-parse", "HEAD" }).stdout)
+  write_file(vim.fs.joinpath(root, "blamed.txt"), "first\nsecond\nthird\n")
+  git(root, { "commit", "-q", "-am", "second commit" })
+  local second = vim.trim(git(root, { "rev-parse", "HEAD" }).stdout)
+
+  local blame = require("ngit.git.blame")
+  local lines, commits, err = wait_for(function(done)
+    blame.load(root, "blamed.txt", {}, done)
+  end)
+  equal(nil, err)
+  equal(3, #lines)
+  equal(first, lines[1].oid)
+  equal(second, lines[3].oid)
+  equal("first", lines[1].text)
+  equal("ngit tests", commits[first].author)
+  equal("second commit", commits[second].summary)
+  truthy(commits[first].timestamp > 0)
+end)
+
+test("worktree and submodule listings parse their porcelain forms", function()
+  local worktree = require("ngit.git.worktree")
+  local parsed = worktree.parse(table.concat({
+    "worktree /repo",
+    "HEAD abc",
+    "branch refs/heads/main",
+    "",
+    "worktree /repo/feature",
+    "HEAD def",
+    "detached",
+    "locked",
+    "",
+  }, "\n"))
+  equal(2, #parsed)
+  equal("/repo", parsed[1].path)
+  equal("main", parsed[1].branch)
+  equal(true, parsed[2].detached)
+  equal(true, parsed[2].locked)
+
+  local submodule = require("ngit.git.submodule")
+  local modules = submodule.parse(table.concat({
+    " 1111111111111111111111111111111111111111 vendor/one (v1.0)",
+    "+2222222222222222222222222222222222222222 vendor/two (heads/main)",
+    "-3333333333333333333333333333333333333333 vendor/three",
+  }, "\n"))
+  equal(3, #modules)
+  equal("current", modules[1].state)
+  equal("vendor/one", modules[1].path)
+  equal("v1.0", modules[1].describe)
+  equal("modified", modules[2].state)
+  equal("uninitialized", modules[3].state)
+
+  local root = repository()
+  git(root, { "commit", "-q", "--allow-empty", "-m", "initial" })
+  local live, err = wait_for(function(done)
+    worktree.list(root, done)
+  end)
+  equal(nil, err)
+  equal(1, #live)
+  -- Git reports the resolved path, and a temporary directory on macOS reaches it
+  -- through a symlink, so the comparison has to resolve too.
+  equal(vim.uv.fs_realpath(root), vim.uv.fs_realpath(live[1].path))
+end)
+
+test("commit history accepts server-side filters and follows one path", function()
+  local log = require("ngit.git.log")
+  equal(nil, log.parse_query("plain substring"))
+  equal({ author = "ada" }, log.parse_query("author:ada"))
+  equal({ grep = "fix crash", path = "lua/" }, log.parse_query('grep:"fix crash" path:lua/'))
+  equal({ since = "2.weeks", all = true }, log.parse_query("since:2.weeks all:true"))
+
+  local root = repository()
+  write_file(vim.fs.joinpath(root, "followed.txt"), "one\n")
+  git(root, { "add", "followed.txt" })
+  git(root, { "commit", "-q", "-m", "add followed" })
+  write_file(vim.fs.joinpath(root, "other.txt"), "one\n")
+  git(root, { "add", "other.txt" })
+  git(root, { "commit", "-q", "-m", "add other" })
+  assert(
+    vim.uv.fs_rename(vim.fs.joinpath(root, "followed.txt"), vim.fs.joinpath(root, "renamed.txt"))
+  )
+  git(root, { "add", "-A" })
+  git(root, { "commit", "-q", "-m", "rename followed" })
+
+  local matched = wait_for(function(done)
+    log.list(root, { limit = 10, query = { grep = "add other" } }, done)
+  end)
+  equal(1, #matched)
+  equal("add other", matched[1].subject)
+
+  -- --follow is what makes the pre-rename history visible under the new name.
+  local followed = wait_for(function(done)
+    log.list(root, { limit = 10, path = "renamed.txt", follow = true }, done)
+  end)
+  equal(2, #followed)
+  equal("rename followed", followed[1].subject)
+  equal("add followed", followed[2].subject)
+
+  local narrowed = wait_for(function(done)
+    log.show(root, matched[1].oid, 10000, done, "other.txt")
+  end)
+  truthy(narrowed.text:find("other.txt", 1, true))
+end)
+
+test("remote URLs become browsable links only when the shape is unambiguous", function()
+  local remote = require("ngit.git.remote")
+  equal("https://github.com/owner/repo", remote.browse_url("git@github.com:owner/repo.git"))
+  equal("https://gitlab.com/group/sub/repo", remote.browse_url("git@gitlab.com:group/sub/repo"))
+  equal(
+    "https://github.com/owner/repo",
+    remote.browse_url("ssh://git@github.com:22/owner/repo.git")
+  )
+  equal("https://github.com/owner/repo", remote.browse_url("https://github.com/owner/repo.git"))
+  equal(nil, remote.browse_url("/srv/git/repo.git"))
+  equal(nil, remote.browse_url(""))
+
+  local root = repository()
+  git(root, { "commit", "-q", "--allow-empty", "-m", "initial" })
+  git(root, { "remote", "add", "origin", "git@github.com:owner/repo.git" })
+  local remotes, err = wait_for(function(done)
+    remote.list(root, done)
+  end)
+  equal(nil, err)
+  equal(1, #remotes)
+  equal("origin", remotes[1].name)
+  equal("git@github.com:owner/repo.git", remotes[1].fetch_url)
+end)
+
+test("ignoring whitespace demotes the row and disables hunk actions", function()
+  local root = repository()
+  write_file(vim.fs.joinpath(root, "spaced.txt"), "value = 1\nkeep = 2\n")
+  git(root, { "add", "spaced.txt" })
+  git(root, { "commit", "-q", "-m", "initial" })
+  write_file(vim.fs.joinpath(root, "spaced.txt"), "value   =   1\nkeep = 22\n")
+
+  local diff_backend = require("ngit.git.diff")
+  local plain = wait_for(function(done)
+    diff_backend.load(root, "unstaged", "spaced.txt", 3, 10000, done)
+  end)
+  truthy(plain.text:find("+value   =   1", 1, true))
+
+  local ignored = wait_for(function(done)
+    diff_backend.load(root, "unstaged", "spaced.txt", 3, 10000, done, { ignore_whitespace = true })
+  end)
+  -- The row does not disappear, it is demoted to context — printed in its new,
+  -- collapsed form. That is exactly why the patch cannot be applied: the context
+  -- text is not what the index holds.
+  truthy(ignored.text:find("\n value   =   1", 1, true), "the row was not demoted to context")
+  truthy(not ignored.text:find("+value", 1, true), "the whitespace-only change was still a change")
+  truthy(not ignored.text:find("-value", 1, true), "the whitespace-only change was still a change")
+  truthy(ignored.text:find("+keep = 22", 1, true), "the real change was hidden")
+
+  local patch = assert(diff_backend.patch_at_hunk(ignored.lines, ignored.hunks[1]))
+  local applied = wait_for(function(done)
+    require("ngit.git.mutate").apply(root, patch, { target = "index" }, done)
+  end)
+  equal(false, applied, "git accepted a patch built from a collapsed context line")
+
+  -- So the session refuses the hunk rather than handing git something it cannot
+  -- place, while the whole file still stages.
+  require("ngit").setup({ ignore_whitespace = true })
+  require("ngit").open({ cwd = root })
+  truthy(vim.wait(10000, function()
+    local session = require("ngit")._active_session()
+    return session and session.current_diff ~= nil
+  end, 10))
+  local session = require("ngit")._active_session()
+  session.dashboard:focus_preview()
+  local refused, reason = session:selection_patch(false)
+  equal(nil, refused)
+  truthy(reason and reason:find("whitespace", 1, true), "the refusal did not say why")
+
+  session:focus_panel("status")
+  session:stage()
+  truthy(
+    vim.wait(10000, function()
+      return git(root, { "diff", "--cached", "--name-only" }).stdout:find("spaced.txt", 1, true)
+        ~= nil
+    end, 10),
+    "the whole file did not stage while whitespace was ignored"
+  )
+  require("ngit").close()
+  require("ngit").setup()
+end)
+
+test("commit switches reach git and the editor names them", function()
+  local root = repository()
+  write_file(vim.fs.joinpath(root, "signed.txt"), "one\n")
+  git(root, { "add", "signed.txt" })
+  local ok, err = wait_for(function(done)
+    require("ngit.git.mutate").commit(root, "signed commit", { signoff = true }, done)
+  end)
+  equal(true, ok, err)
+  truthy(git(root, { "log", "-1", "--format=%B" }).stdout:find("Signed-off-by:", 1, true))
+
+  local CommitEditor = require("ngit.ui.commit_editor")
+  local editor = CommitEditor.new(root, {
+    amend = false,
+    staged = 1,
+    branch = "main",
+    commit_options = { signoff = true, no_verify = true },
+    on_complete = function() end,
+  })
+  local title = editor:title()
+  truthy(title:find("--signoff", 1, true), "the title hid a switch that changes the commit")
+  truthy(title:find("--no-verify", 1, true))
+  editor:close()
+end)
+
+test("review mode lists a range and refuses to stage from it", function()
+  local root = repository()
+  write_file(vim.fs.joinpath(root, "reviewed.txt"), "base\n")
+  git(root, { "add", "reviewed.txt" })
+  git(root, { "commit", "-q", "-m", "base" })
+  git(root, { "switch", "-q", "-c", "feature" })
+  write_file(vim.fs.joinpath(root, "reviewed.txt"), "changed\n")
+  git(root, { "commit", "-q", "-am", "feature" })
+  -- An unstaged working-tree change, so leaving review mode is observable.
+  write_file(vim.fs.joinpath(root, "reviewed.txt"), "changed again\n")
+
+  require("ngit").open({ cwd = root })
+  truthy(vim.wait(10000, function()
+    local session = require("ngit")._active_session()
+    return session and session.status ~= nil
+  end, 10))
+  local session = require("ngit")._active_session()
+
+  session:set_range("main...HEAD")
+  truthy(
+    vim.wait(10000, function()
+      return session.range_files ~= nil and #session.panels.status.entries == 1
+    end, 10),
+    "the range file list never arrived"
+  )
+  equal("range", session.panels.status.entries[1].section)
+  equal("reviewed.txt", session.panels.status.entries[1].file.path)
+  truthy(session.dashboard.panels.status.detail:find("review main...HEAD", 1, true))
+
+  -- Staging has no meaning against a commit-to-commit range, so it is refused
+  -- rather than passed to git.
+  local staged_before = git(root, { "diff", "--cached", "--name-only" }).stdout
+  session:stage()
+  equal(staged_before, git(root, { "diff", "--cached", "--name-only" }).stdout)
+
+  session:set_range(nil)
+  truthy(
+    vim.wait(10000, function()
+      return session.range == nil
+        and #session.panels.status.entries == 1
+        and session.panels.status.entries[1].section == "unstaged"
+    end, 10),
+    "leaving review mode did not restore the working tree list"
+  )
+  require("ngit").close()
+end)
+
+test("following one file narrows the Commits panel to its history", function()
+  local root = repository()
+  write_file(vim.fs.joinpath(root, "tracked.txt"), "one\n")
+  git(root, { "add", "tracked.txt" })
+  git(root, { "commit", "-q", "-m", "touch tracked" })
+  write_file(vim.fs.joinpath(root, "unrelated.txt"), "one\n")
+  git(root, { "add", "unrelated.txt" })
+  git(root, { "commit", "-q", "-m", "touch unrelated" })
+
+  require("ngit").open({ cwd = root })
+  truthy(vim.wait(10000, function()
+    local session = require("ngit")._active_session()
+    return session and #(session.panels.commits.data or {}) == 2
+  end, 10))
+  local session = require("ngit")._active_session()
+
+  session:set_history("tracked.txt")
+  truthy(
+    vim.wait(10000, function()
+      return #(session.panels.commits.data or {}) == 1
+    end, 10),
+    "the history filter never narrowed the panel"
+  )
+  equal("touch tracked", session.panels.commits.data[1].subject)
+
+  session:set_history(nil)
+  truthy(vim.wait(10000, function()
+    return #(session.panels.commits.data or {}) == 2
+  end, 10))
+  require("ngit").close()
+end)
+
+test("diff options are part of the preview cache key", function()
+  local root = repository()
+  write_file(vim.fs.joinpath(root, "options.txt"), "one\n")
+  git(root, { "add", "options.txt" })
+  git(root, { "commit", "-q", "-m", "initial" })
+  write_file(vim.fs.joinpath(root, "options.txt"), "two\n")
+
+  require("ngit").open({ cwd = root })
+  truthy(vim.wait(10000, function()
+    local session = require("ngit")._active_session()
+    return session and session.current_diff ~= nil
+  end, 10))
+  local session = require("ngit")._active_session()
+  local entry = session.panels.status.entries[1]
+  local before = session:cache_key(entry)
+
+  session:toggle_whitespace()
+  truthy(session.config.ignore_whitespace)
+  truthy(session:cache_key(entry) ~= before, "ignoring whitespace reused the previous preview")
+
+  session:adjust_context(3)
+  equal(6, session.config.context)
+  truthy(session:cache_key(entry):find("6w", 1, true), "the context width is not in the key")
+
+  session:toggle_whitespace()
+  equal(false, session.config.ignore_whitespace)
+  require("ngit").close()
+end)
+
+test("blame rows carry their commit and open it in the Commits panel", function()
+  local root = repository()
+  write_file(vim.fs.joinpath(root, "opened.txt"), "one\ntwo\n")
+  git(root, { "add", "opened.txt" })
+  git(root, { "commit", "-q", "-m", "first" })
+  write_file(vim.fs.joinpath(root, "opened.txt"), "one\ntwo\nthree\n")
+  git(root, { "commit", "-q", "-am", "second" })
+  local head = vim.trim(git(root, { "rev-parse", "HEAD" }).stdout)
+
+  require("ngit").open({ cwd = root })
+  truthy(vim.wait(10000, function()
+    local session = require("ngit")._active_session()
+    return session and #(session.panels.commits.data or {}) == 2
+  end, 10))
+  local session = require("ngit")._active_session()
+
+  session:blame_path("opened.txt", 3)
+  truthy(
+    vim.wait(10000, function()
+      return session.blame_view ~= nil and not session.blame_view.closed
+    end, 10),
+    "the blame view never opened"
+  )
+  local view = session.blame_view
+  local lines = vim.api.nvim_buf_get_lines(view.buffer, 0, -1, false)
+  equal(3, #lines)
+  truthy(lines[1]:find("ngit tests", 1, true), "the author column is missing")
+  truthy(lines[3]:find(head:sub(1, 8), 1, true), "the newest row names the wrong commit")
+  -- A run of lines from one commit annotates only its first row.
+  truthy(lines[2]:find("^%s+│"), "a repeated commit annotated every row")
+
+  vim.api.nvim_set_current_win(view.window)
+  vim.api.nvim_win_set_cursor(view.window, { 3, 0 })
+  vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<CR>", true, false, true), "x", false)
+  truthy(
+    vim.wait(10000, function()
+      local entry = session.panels.commits.entries[session.panels.commits.selected]
+      return session.active_panel == "commits" and entry and entry.commit.oid == head
+    end, 10),
+    "pressing <CR> in blame did not reveal the commit"
+  )
+  require("ngit").close()
+end)
+
+test("the rebase plan editor cycles actions, reorders, and refuses an empty plan", function()
+  local RebaseEditor = require("ngit.ui.rebase_editor")
+  local submitted
+  local editor = RebaseEditor.new({
+    base = "HEAD~2",
+    label = "HEAD~2",
+    steps = {
+      { action = "pick", oid = string.rep("a", 40), subject = "first" },
+      { action = "pick", oid = string.rep("b", 40), subject = "second" },
+    },
+    on_submit = function(plan)
+      submitted = plan
+    end,
+    on_close = function() end,
+  })
+
+  local lines = vim.api.nvim_buf_get_lines(editor.buffer, 0, -1, false)
+  equal(2, #lines)
+  truthy(lines[1]:find("pick", 1, true))
+
+  -- Squashing the first commit has nothing before it to fold into.
+  vim.api.nvim_win_set_cursor(editor.window, { 1, 0 })
+  editor:set_action("squash")
+  equal("pick", editor.steps[1].action)
+
+  vim.api.nvim_win_set_cursor(editor.window, { 2, 0 })
+  editor:set_action("squash")
+  equal("squash", editor.steps[2].action)
+  editor:move(-1)
+  equal("second", editor.steps[1].subject)
+  equal(1, vim.api.nvim_win_get_cursor(editor.window)[1])
+
+  editor.steps[1].action = "drop"
+  editor.steps[2].action = "drop"
+  editor:submit()
+  equal(nil, submitted)
+
+  editor.steps[1].action = "pick"
+  editor:submit()
+  truthy(submitted, "a valid plan was not submitted")
+  equal(true, editor.closed)
+end)
+
+test("every menu builds its choices against a real repository", function()
+  local root = repository()
+  write_file(vim.fs.joinpath(root, "menu.txt"), "one\n")
+  git(root, { "add", "menu.txt" })
+  git(root, { "commit", "-q", "-m", "first commit" })
+  git(root, { "remote", "add", "origin", "git@github.com:owner/repo.git" })
+  git(root, { "branch", "topic" })
+  write_file(vim.fs.joinpath(root, "menu.txt"), "two\n")
+  git(root, { "stash", "push", "-q", "-m", "a stash" })
+  write_file(vim.fs.joinpath(root, "menu.txt"), "three\n")
+  write_file(vim.fs.joinpath(root, "fresh.txt"), "new\n")
+
+  require("ngit").open({ cwd = root })
+  truthy(vim.wait(10000, function()
+    local session = require("ngit")._active_session()
+    return session
+      and session.status ~= nil
+      and #(session.panels.commits.data or {}) > 0
+      and #(session.panels.stashes.data or {}) > 0
+  end, 10))
+  local session = require("ngit")._active_session()
+
+  -- Both pickers are answered with a cancel, so the menus are built and torn down
+  -- without anything being run against the repository.
+  local prompts = {}
+  local original_select, original_input = vim.ui.select, vim.ui.input
+  vim.ui.select = function(items, opts, on_choice)
+    prompts[#prompts + 1] = { prompt = (opts or {}).prompt or "", items = items }
+    on_choice(nil, nil)
+  end
+  vim.ui.input = function(opts, on_confirm)
+    prompts[#prompts + 1] = { prompt = (opts or {}).prompt or "", items = {} }
+    on_confirm(nil)
+  end
+
+  local function invoke(panel, method, expected)
+    local before = #prompts
+    session:focus_panel(panel)
+    session[method](session)
+    truthy(
+      vim.wait(5000, function()
+        return #prompts > before
+      end, 10),
+      ("%s offered no choices"):format(method)
+    )
+    local last = prompts[#prompts]
+    truthy(
+      last.prompt:find(expected, 1, true),
+      ("%s prompted %q, expected %q"):format(method, last.prompt, expected)
+    )
+    return last
+  end
+
+  local ok, err = pcall(function()
+    invoke("status", "commit_menu", "Commit")
+    invoke("status", "stash_menu", "Stash")
+    invoke("status", "file_menu", "menu.txt")
+    invoke("status", "review", "Review")
+    invoke("status", "file_history", "History")
+    invoke("status", "remote_menu", "Remote")
+    invoke("status", "repos_menu", "Worktrees and submodules")
+
+    local reset = invoke("commits", "reset", "Reset onto")
+    equal(4, #reset.items)
+    truthy(reset.items[1]:find("Cancel", 1, true), "Cancel is not the first choice")
+    truthy(reset.items[4]:find("--hard", 1, true), "the destructive mode is missing")
+
+    invoke("commits", "revert", "Revert")
+    invoke("commits", "checkout_commit", "detached HEAD")
+    invoke("commits", "tag", "Tag name for")
+    invoke("commits", "interactive_rebase", "Interactive rebase")
+    local copy = invoke("commits", "copy_menu", "Copy")
+    truthy(#copy.items >= 5, "the commit copy menu is missing entries")
+
+    invoke("branches", "set_upstream", "Upstream for")
+    invoke("branches", "rename_item", "Rename")
+    invoke("stashes", "delete_item", "Drop")
+
+    -- The way back out of review mode only makes sense once there is one.
+    local before_range = invoke("status", "review", "Review")
+    for _, label in ipairs(before_range.items) do
+      truthy(
+        not label:find("Back to the working tree", 1, true),
+        "review offered a way out before there was a range"
+      )
+    end
+    session.range = { spec = "main...HEAD" }
+    local during_range = invoke("status", "review", "Review")
+    local offers_exit = false
+    for _, label in ipairs(during_range.items) do
+      offers_exit = offers_exit or label:find("Back to the working tree", 1, true) ~= nil
+    end
+    truthy(offers_exit, "review offered no way back to the working tree")
+    session.range = nil
+  end)
+
+  vim.ui.select, vim.ui.input = original_select, original_input
+  require("ngit").close()
+  truthy(ok, tostring(err))
+end)
+
+test("footer actions stay a single row while the key sheet lists everything", function()
+  local mappings = require("ngit.config").defaults().mappings
+  local actions = require("ngit.ui.actions")
+  local footer = actions.for_context({
+    panel = "commits",
+    entry = { kind = "commit", commit = { oid = "abc", subject = "x" } },
+    has_more = false,
+  }, mappings)
+  local ids = {}
+  for _, item in ipairs(footer) do
+    ids[item.id] = true
+  end
+  truthy(ids.revert, "revert is common enough to belong in the footer")
+  truthy(not ids.copy_menu, "menu actions must not crowd the footer")
+  truthy(not ids.blame, "menu actions must not crowd the footer")
+
+  -- Hidden actions still have to be discoverable, so they are in the key sheet.
+  local sheet = table.concat(require("ngit.ui.help").lines(mappings), "\n")
+  for _, label in ipairs({
+    "Blame the selected file",
+    "Review a revision range",
+    "Interactive rebase plan",
+    "Remote options",
+    "Copy hash, path, or patch",
+    "Worktrees and submodules",
+  }) do
+    truthy(sheet:find(label, 1, true), ("the key sheet omits %q"):format(label))
+  end
 end)
 
 test("every action a panel offers is reachable from its own mapping", function()

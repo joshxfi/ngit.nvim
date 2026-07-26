@@ -1,10 +1,25 @@
 local branch_backend = require("ngit.git.branch")
 local log_backend = require("ngit.git.log")
+local range_backend = require("ngit.git.range")
 local sequencer_backend = require("ngit.git.sequencer")
 local stash_backend = require("ngit.git.stash")
 local status_backend = require("ngit.git.status")
 
 local M = {}
+
+--- Options the Commits panel is currently listing under: a followed path and any
+--- server-side filter the reader typed.
+---@return table
+function M.commit_options(self, skip)
+  local panel = self.panels.commits
+  return {
+    limit = self.config.commit_limit,
+    skip = skip or 0,
+    path = self.history and self.history.path or nil,
+    follow = self.history and self.history.follow or nil,
+    query = panel.query,
+  }
+end
 
 local function entry_key(entry)
   if not entry then
@@ -55,6 +70,39 @@ function M.schedule(self, scope)
       end
     end
   end, self.config.refresh_debounce_ms)
+end
+
+--- Loads the file list for the active review range.
+---
+--- The range is commit to commit, so nothing a save can do changes it; only a
+--- full refresh reloads it, and a status-only refresh leaves it alone.
+local function load_range(self, generation, preferred)
+  local panel = self.panels.status
+  local request = panel.request
+  local job
+  job = range_backend.files(self.root, self.range.spec, function(files, err)
+    if self.range_job == job then
+      self.range_job = nil
+    end
+    if
+      self.closed
+      or (generation and generation ~= self.refresh_generation)
+      or request ~= panel.request
+    then
+      return
+    end
+    if not files then
+      self:render_panel_error("status", err or "Unable to load the review range")
+      return
+    end
+    self.range_files = files
+    panel.loading = false
+    self:render_files(preferred)
+    if self.active_panel == "status" then
+      self:load_preview()
+    end
+  end)
+  self.range_job = job
 end
 
 local function load_operation(self, generation, preferred)
@@ -140,13 +188,20 @@ function M.full(self)
     status_panel.data = status
     status_panel.loading = false
     self:render_files(preferred.status)
-    if self.active_panel == "status" then
+    -- In review mode the range load owns the preview; letting status claim it too
+    -- would flash "no changes" between the two callbacks.
+    if self.active_panel == "status" and not self.range then
       self:load_preview()
     end
   end)
   status_panel.job = status_job
   self.status_job = status_job
   load_operation(self, generation, preferred.status)
+  if self.range then
+    load_range(self, generation, preferred.status)
+  else
+    self.range_files = nil
+  end
 
   local function load_collection(id, start)
     local panel = self.panels[id]
@@ -175,13 +230,9 @@ function M.full(self)
   end
 
   load_collection("commits", function(done)
-    return log_backend.list(
-      self.root,
-      { limit = self.config.commit_limit },
-      function(items, has_more, err)
-        done(items, has_more, err)
-      end
-    )
+    return log_backend.list(self.root, M.commit_options(self), function(items, has_more, err)
+      done(items, has_more, err)
+    end)
   end)
   load_collection("branches", function(done)
     return branch_backend.list(self.root, function(items, err)

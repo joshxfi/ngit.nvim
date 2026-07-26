@@ -11,6 +11,7 @@ local linked_definitions = {
   NgitUnstaged = { link = "NgitUnstagedSign" },
   NgitUntracked = { link = "NgitUntrackedSign" },
   NgitConflict = { link = "NgitConflictSign" },
+  NgitRange = { link = "NgitRangeSign" },
   NgitSuccess = { link = "DiagnosticOk" },
   NgitFailure = { link = "DiagnosticError" },
   NgitDiffHeader = { link = "Title" },
@@ -82,6 +83,9 @@ local function derived_definitions()
     NgitUnstagedSign = { fg = yellow, bold = true },
     NgitUntrackedSign = { fg = blue, bold = true },
     NgitConflictSign = { fg = red, bold = true },
+    -- Review rows are read-only, so their marker takes the muted accent rather
+    -- than one of the four that mean "you can act on this".
+    NgitRangeSign = { fg = blend(background, blue, 0.75), bold = true },
     NgitDiffAdd = { bg = blend(background, green, line_amount) },
     NgitDiffDelete = { bg = blend(background, red, line_amount) },
     NgitDiffChange = { bg = blend(background, yellow, line_amount) },

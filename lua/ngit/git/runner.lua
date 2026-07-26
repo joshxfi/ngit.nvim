@@ -14,16 +14,21 @@ local function schedule(callback, value)
   end)
 end
 
-local function command_for(args)
-  local command = {
-    "git",
-    "--no-pager",
-    "--literal-pathspecs",
-    "-c",
-    "color.ui=false",
-    "-c",
-    "core.quotepath=false",
-  }
+--- `--literal-pathspecs` is what keeps a file called `:(top)name.txt` from being
+--- read as pathspec magic, so it is on for everything that takes a path from the
+--- user.
+---
+--- A few porcelain commands build pathspecs of their own, though: `git stash push
+--- --keep-index` runs an internal checkout against `:/`, and the literal flag
+--- makes git reject its own argument. Those callers opt out and mark their paths
+--- with the `:(literal)` prefix instead, which is the per-pathspec form of the
+--- same guarantee.
+local function command_for(args, literal_pathspecs)
+  local command = { "git", "--no-pager" }
+  if literal_pathspecs ~= false then
+    command[#command + 1] = "--literal-pathspecs"
+  end
+  vim.list_extend(command, { "-c", "color.ui=false", "-c", "core.quotepath=false" })
   vim.list_extend(command, args)
   return command
 end
@@ -32,16 +37,29 @@ function M.command(args)
   return command_for(args)
 end
 
+--- Marks a path so it survives without `--literal-pathspecs`.
+---@param path string
+---@return string
+function M.literal(path)
+  return ":(literal)" .. path
+end
+
 ---@param args string[]
----@param opts? { cwd?: string, stdin?: string, readonly?: boolean, text?: boolean, max_stdout_bytes?: integer }
+---@param opts? { cwd?: string, stdin?: string, readonly?: boolean, text?: boolean, max_stdout_bytes?: integer, env?: table<string, string>, literal_pathspecs?: boolean }
 ---@param callback fun(result: NgitGitResult)
 ---@return vim.SystemObj?
 function M.run(args, opts, callback)
   opts = opts or {}
-  local command = command_for(args)
+  local command = command_for(args, opts.literal_pathspecs)
   local env = { LC_ALL = "C", GIT_PAGER = "cat" }
   if opts.readonly ~= false then
     env.GIT_OPTIONAL_LOCKS = "0"
+  end
+  -- Editor overrides for the sequencer arrive this way. They are merged rather
+  -- than replacing the base set so a caller cannot accidentally drop the C
+  -- locale the parsers depend on.
+  for name, value in pairs(opts.env or {}) do
+    env[name] = value
   end
 
   local stdout_chunks = {}

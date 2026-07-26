@@ -37,3 +37,26 @@ for command, view in pairs({
     desc = ("Open the ngit %s view"):format(selected_view),
   })
 end
+
+vim.api.nvim_create_user_command("NGitReview", function(command)
+  require("ngit").review(command.args ~= "" and command.args or nil)
+end, {
+  desc = "Review a revision range, or this branch against its upstream",
+  nargs = "?",
+})
+
+vim.api.nvim_create_user_command("NGitBlame", function(command)
+  require("ngit").blame(command.args ~= "" and vim.fn.expand(command.args) or nil)
+end, {
+  desc = "Blame a file, or the current buffer",
+  nargs = "?",
+  complete = "file",
+})
+
+vim.api.nvim_create_user_command("NGitHistory", function(command)
+  require("ngit").history(command.args ~= "" and command.args or nil)
+end, {
+  desc = "Follow one file's history, or the current buffer's",
+  nargs = "?",
+  complete = "file",
+})

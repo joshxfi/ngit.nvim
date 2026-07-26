@@ -34,7 +34,7 @@ local function trim_message(lines)
 end
 
 ---@param root string
----@param opts { amend: boolean, message?: string, staged?: integer, branch?: string, on_complete: fun() }
+---@param opts { amend: boolean, message?: string, staged?: integer, branch?: string, commit_options?: NgitCommitOptions, on_complete: fun() }
 function CommitEditor.new(root, opts)
   next_id = next_id + 1
   local self = setmetatable({
@@ -42,6 +42,9 @@ function CommitEditor.new(root, opts)
     amend = opts.amend,
     staged = opts.staged,
     branch = opts.branch,
+    -- Switches chosen from the commit menu travel with the editor, so the buffer
+    -- the message is typed into records what the commit will actually run with.
+    commit_options = opts.commit_options or { amend = opts.amend == true },
     on_complete = opts.on_complete,
     submitting = false,
     closed = false,
@@ -50,7 +53,9 @@ function CommitEditor.new(root, opts)
   return self
 end
 
---- Names what is about to be recorded, so the editor is not a bare text box.
+--- Names what is about to be recorded, so the editor is not a bare text box. The
+--- chosen switches are part of that: signing off or skipping hooks changes what
+--- the commit means, and the title is the last place to notice it.
 function CommitEditor:title()
   local parts = { self.amend and "Amend" or "Commit" }
   if self.branch and self.branch ~= "" then
@@ -58,6 +63,21 @@ function CommitEditor:title()
   end
   if self.staged and self.staged > 0 then
     parts[#parts + 1] = ("· %d file%s"):format(self.staged, self.staged == 1 and "" or "s")
+  end
+  local switches = {}
+  for name, flag in pairs({
+    signoff = "--signoff",
+    no_verify = "--no-verify",
+    gpg_sign = "--gpg-sign",
+    allow_empty = "--allow-empty",
+  }) do
+    if self.commit_options[name] then
+      switches[#switches + 1] = flag
+    end
+  end
+  table.sort(switches)
+  if #switches > 0 then
+    parts[#parts + 1] = "· " .. table.concat(switches, " ")
   end
   return (" %s  —  <C-s> submit, q abort "):format(table.concat(parts, " "))
 end
@@ -150,7 +170,7 @@ function CommitEditor:submit()
     return
   end
   self.submitting = true
-  mutate.commit(self.root, message, self.amend, function(ok, err)
+  mutate.commit(self.root, message, self.commit_options, function(ok, err)
     self.submitting = false
     if not ok then
       notify(err or "Commit failed", vim.log.levels.ERROR)

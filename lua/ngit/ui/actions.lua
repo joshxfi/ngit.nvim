@@ -200,6 +200,204 @@ local definitions = {
     end,
   },
   {
+    id = "revert",
+    mapping = "revert",
+    label = "Revert",
+    panels = panels("commits"),
+    method = "revert",
+    enabled = function(context)
+      return context.entry ~= nil
+    end,
+  },
+  {
+    id = "reset",
+    mapping = "reset",
+    label = "Reset",
+    panels = panels("commits", "branches"),
+    method = "reset",
+    enabled = function(context)
+      return context.entry ~= nil
+    end,
+  },
+  {
+    id = "checkout_commit",
+    mapping = "checkout_commit",
+    label = "Detach",
+    panels = panels("commits", "branches"),
+    method = "checkout_commit",
+    hidden = true,
+    enabled = function(context)
+      return context.entry ~= nil
+    end,
+  },
+  {
+    id = "tag",
+    mapping = "tag",
+    label = "Tag",
+    panels = panels("commits", "branches"),
+    method = "tag",
+    hidden = true,
+  },
+  {
+    id = "interactive_rebase",
+    mapping = "interactive_rebase",
+    label = "Rebase plan",
+    panels = panels("commits", "branches"),
+    method = "interactive_rebase",
+    hidden = true,
+  },
+  {
+    id = "rename_item",
+    mapping = "rename_item",
+    label = "Rename",
+    panels = panels("branches"),
+    method = "rename_item",
+    hidden = true,
+    enabled = function(context)
+      return context.entry ~= nil
+    end,
+  },
+  {
+    id = "set_upstream",
+    mapping = "set_upstream",
+    label = "Upstream",
+    panels = panels("branches"),
+    method = "set_upstream",
+    hidden = true,
+  },
+  {
+    id = "stash_menu",
+    mapping = "stash_menu",
+    label = "Stash options",
+    method = "stash_menu",
+    global = true,
+    hidden = true,
+  },
+  {
+    id = "commit_menu",
+    mapping = "commit_menu",
+    label = "Commit options",
+    method = "commit_menu",
+    global = true,
+    hidden = true,
+  },
+  {
+    id = "file_menu",
+    mapping = "file_menu",
+    label = "File options",
+    panels = panels("status"),
+    method = "file_menu",
+    hidden = true,
+  },
+  {
+    id = "copy_menu",
+    mapping = "copy_menu",
+    label = "Copy",
+    method = "copy_menu",
+    global = true,
+    hidden = true,
+  },
+  {
+    id = "review",
+    mapping = "review",
+    label = "Review",
+    method = "review",
+    global = true,
+  },
+  {
+    id = "blame",
+    mapping = "blame",
+    label = "Blame",
+    method = "blame",
+    global = true,
+    hidden = true,
+  },
+  {
+    id = "file_history",
+    mapping = "file_history",
+    label = "History",
+    method = "file_history",
+    global = true,
+    hidden = true,
+  },
+  {
+    id = "repos_menu",
+    mapping = "repos_menu",
+    label = "Worktrees",
+    method = "repos_menu",
+    global = true,
+    hidden = true,
+  },
+  {
+    id = "remote_menu",
+    mapping = "remote_menu",
+    label = "Remote",
+    method = "remote_menu",
+    global = true,
+    hidden = true,
+  },
+  {
+    id = "choose_both",
+    mapping = "choose_both",
+    label = "Both",
+    panels = panels("status"),
+    method = "choose_conflict",
+    args = { "both" },
+    enabled = function(context)
+      return context.entry and context.entry.section == "conflict"
+    end,
+  },
+  {
+    id = "next_conflict",
+    mapping = "next_conflict",
+    label = "Next conflict",
+    panels = panels("status"),
+    method = "jump_conflict",
+    args = { 1 },
+    hidden = true,
+    enabled = function(context)
+      return context.entry and context.entry.section == "conflict"
+    end,
+  },
+  {
+    id = "prev_conflict",
+    mapping = "prev_conflict",
+    label = "Previous conflict",
+    panels = panels("status"),
+    method = "jump_conflict",
+    args = { -1 },
+    hidden = true,
+    enabled = function(context)
+      return context.entry and context.entry.section == "conflict"
+    end,
+  },
+  {
+    id = "toggle_whitespace",
+    mapping = "toggle_whitespace",
+    label = "Whitespace",
+    method = "toggle_whitespace",
+    global = true,
+    hidden = true,
+  },
+  {
+    id = "increase_context",
+    mapping = "increase_context",
+    label = "More context",
+    method = "adjust_context",
+    args = { 3 },
+    global = true,
+    hidden = true,
+  },
+  {
+    id = "decrease_context",
+    mapping = "decrease_context",
+    label = "Less context",
+    method = "adjust_context",
+    args = { -3 },
+    global = true,
+    hidden = true,
+  },
+  {
     id = "load_more",
     mapping = "load_more",
     label = "More",
@@ -298,12 +496,17 @@ function M.definitions()
   return definitions
 end
 
+--- Actions for the one-line footer.
+---
+--- `hidden` actions are mapped and listed in the key sheet but left out here: the
+--- footer is a single row, and pushing the everyday keys off the end of it to make
+--- room for menus would cost more than it explains.
 function M.for_context(context, mappings)
   local specific = {}
   local global = {}
   for _, action in ipairs(definitions) do
     local key = mappings[action.mapping]
-    if key and key ~= false and key ~= "" and applies(action, context) then
+    if not action.hidden and key and key ~= false and key ~= "" and applies(action, context) then
       local item = {
         id = action.id,
         key = key,

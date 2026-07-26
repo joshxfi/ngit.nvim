@@ -3,12 +3,14 @@ local actions = require("ngit.ui.actions")
 local branch_backend = require("ngit.git.branch")
 local diff_backend = require("ngit.git.diff")
 local log_backend = require("ngit.git.log")
+local range_backend = require("ngit.git.range")
 local stash_backend = require("ngit.git.stash")
 local Dashboard = require("ngit.ui.dashboard")
 local DiffView = require("ngit.ui.diff_view")
 local Help = require("ngit.ui.help")
 local Render = require("ngit.ui.render")
 local SessionCommands = require("ngit.ui.session_commands")
+local SessionGit = require("ngit.ui.session_git")
 local SessionMappings = require("ngit.ui.session_mappings")
 local SessionRefresh = require("ngit.ui.session_refresh")
 local Lru = require("ngit.util.lru")
@@ -18,24 +20,27 @@ Session.__index = Session
 
 local next_id = 0
 
-local section_order = { "conflict", "staged", "unstaged", "untracked" }
+local section_order = { "conflict", "staged", "unstaged", "untracked", "range" }
 local section_titles = {
   conflict = "Conflicts",
   staged = "Staged",
   unstaged = "Unstaged",
   untracked = "Untracked",
+  range = "Range",
 }
 local section_highlights = {
   conflict = "NgitConflict",
   staged = "NgitStaged",
   unstaged = "NgitUnstaged",
   untracked = "NgitUntracked",
+  range = "NgitRange",
 }
 local section_sign_highlights = {
   conflict = "NgitConflictSign",
   staged = "NgitStagedSign",
   unstaged = "NgitUnstagedSign",
   untracked = "NgitUntrackedSign",
+  range = "NgitRangeSign",
 }
 
 local function valid_window(window)
@@ -50,8 +55,26 @@ local function status_present(value)
   return value ~= "." and value ~= " " and value ~= "?"
 end
 
+local function empty_groups()
+  return { conflict = {}, staged = {}, unstaged = {}, untracked = {}, range = {} }
+end
+
+--- In review mode the Changes panel lists the files a revision range touches
+--- instead of the working tree, so it gets a section of its own: the entries have
+--- no index or worktree side and no action may treat them as if they did.
+local function range_entries(files, filter)
+  local groups = empty_groups()
+  local needle = filter and filter:lower() or nil
+  for _, file in ipairs(files or {}) do
+    if not needle or needle == "" or file.path:lower():find(needle, 1, true) then
+      groups.range[#groups.range + 1] = { section = "range", file = file }
+    end
+  end
+  return groups
+end
+
 local function display_entries(status, filter)
-  local groups = { conflict = {}, staged = {}, unstaged = {}, untracked = {} }
+  local groups = empty_groups()
   local needle = filter and filter:lower() or nil
 
   for _, file in ipairs(status.files) do
@@ -180,6 +203,24 @@ end
 
 function Session:active_state()
   return self.panels[self.active_panel]
+end
+
+--- Every index-touching panel action asks this first. A review range has no index
+--- side, so answering here is what keeps `s`, `u`, and `X` from producing a
+--- confusing git error while the panel is showing someone else's commits.
+---@return boolean
+function Session:review_only()
+  if not self.range then
+    return false
+  end
+  notify(
+    ("Reviewing %s. Press %s to return to the working tree."):format(
+      self.range.spec,
+      self.config.mappings.review or "the review key"
+    ),
+    vim.log.levels.WARN
+  )
+  return true
 end
 
 function Session:sync_active_aliases()
@@ -402,6 +443,10 @@ function Session:dispose()
     pcall(self.status_job.kill, self.status_job, 15)
     self.status_job = nil
   end
+  if self.range_job then
+    pcall(self.range_job.kill, self.range_job, 15)
+    self.range_job = nil
+  end
   for _, panel in pairs(self.panels) do
     panel.request = panel.request + 1
     if panel.job then
@@ -565,10 +610,11 @@ end
 
 function Session:render_files(preferred_key)
   local panel = self.panels.status
-  if not self.status or not self.dashboard then
+  if not self.dashboard or (not self.status and not self.range) then
     return
   end
-  local groups = display_entries(self.status, panel.filter)
+  local groups = self.range and range_entries(self.range_files, panel.filter)
+    or display_entries(self.status, panel.filter)
   local lines = {}
   local row_entries = {}
   local entries = {}
@@ -606,10 +652,15 @@ function Session:render_files(preferred_key)
   end
 
   if #entries == 0 then
-    lines = {
-      "",
-      panel.filter and "  No changes match the current filter." or "  Working tree clean.",
-    }
+    local empty
+    if panel.filter then
+      empty = "  No changes match the current filter."
+    elseif self.range then
+      empty = ("  %s changes nothing."):format(self.range.spec)
+    else
+      empty = "  Working tree clean."
+    end
+    lines = { "", empty }
   end
 
   panel.entries = entries
@@ -625,11 +676,20 @@ function Session:render_files(preferred_key)
   end
 
   local suffix = ""
-  if self.status.ahead > 0 or self.status.behind > 0 then
+  if self.status and (self.status.ahead > 0 or self.status.behind > 0) then
     suffix = (" ↑%d ↓%d"):format(self.status.ahead, self.status.behind)
+  end
+  if self.range then
+    suffix = suffix .. (" · review %s"):format(self.range.spec)
   end
   if self.operation then
     suffix = suffix .. (" · %s in progress"):format(self.operation)
+  end
+  if self.config.ignore_whitespace then
+    suffix = suffix .. " · -w"
+  end
+  if self.config.context ~= config_module.defaults().context then
+    suffix = suffix .. (" · U%d"):format(self.config.context)
   end
   if panel.filter and panel.filter ~= "" then
     suffix = suffix .. (" · /%s"):format(panel.filter)
@@ -640,7 +700,7 @@ function Session:render_files(preferred_key)
     selected = #entries > 0 and panel.selected or 0,
     selected_row = entries[panel.selected] and entries[panel.selected].row or nil,
     empty = #entries == 0,
-    detail = self.status.branch .. suffix,
+    detail = ((self.status and self.status.branch) or "detached") .. suffix,
     highlights = row_highlights,
   })
   if self.active_panel == "status" then
@@ -767,19 +827,32 @@ function Session:select_relative(delta)
   self:update_actions()
 end
 
+--- Diff options are part of the identity of a cached preview: the same file at
+--- the same generation looks different once whitespace is ignored or the context
+--- width changes, so they belong in the key rather than forcing a cache clear.
+function Session:diff_signature()
+  return ("%d%s"):format(self.config.context, self.config.ignore_whitespace and "w" or "")
+end
+
 function Session:cache_key(entry)
+  local signature = self:diff_signature()
   if entry.kind == "commit" then
-    return table.concat({ "commit", entry.commit.oid }, "\0")
+    return table.concat(
+      { "commit", entry.commit.oid, self.history and self.history.path or "" },
+      "\0"
+    )
   elseif entry.kind == "branch" then
     return table.concat({ "branch", entry.branch.oid }, "\0")
   elseif entry.kind == "stash" then
     return table.concat({ "stash", entry.stash.oid }, "\0")
+  elseif entry.section == "range" then
+    return table.concat({ "range", self.range.spec, entry.file.path, signature }, "\0")
   end
   return table.concat({
     tostring(self.generation),
     entry.section,
     entry.file.path,
-    tostring(self.config.context),
+    signature,
   }, "\0")
 end
 
@@ -836,13 +909,29 @@ function Session:load_preview()
       self:render_preview(entry, diff)
     end
     if entry.kind == "commit" then
-      preview_job =
-        log_backend.show(self.root, entry.commit.oid, self.config.max_diff_bytes, complete)
+      -- While following one file's history the patch is narrowed to it, so a
+      -- sweeping commit does not bury the file being read.
+      preview_job = log_backend.show(
+        self.root,
+        entry.commit.oid,
+        self.config.max_diff_bytes,
+        complete,
+        self.history and self.history.path or nil
+      )
     elseif entry.kind == "branch" then
       preview_job =
         branch_backend.preview(self.root, entry.branch, self.config.max_diff_bytes, complete)
     elseif entry.kind == "stash" then
       preview_job = stash_backend.show(self.root, entry.stash, self.config.max_diff_bytes, complete)
+    elseif entry.section == "range" then
+      preview_job = range_backend.diff(
+        self.root,
+        self.range.spec,
+        entry.file.path,
+        self.config.context,
+        self.config.max_diff_bytes,
+        complete
+      )
     else
       preview_job = diff_backend.load(
         self.root,
@@ -850,7 +939,8 @@ function Session:load_preview()
         entry.file.path,
         self.config.context,
         self.config.max_diff_bytes,
-        complete
+        complete,
+        { ignore_whitespace = self.config.ignore_whitespace }
       )
     end
     self.diff_job = preview_job
@@ -861,9 +951,12 @@ function Session:preview_title(entry)
   if entry.kind == "commit" then
     return ("%s · %s"):format(short_oid(entry.commit.oid), entry.commit.subject)
   elseif entry.kind == "branch" then
-    return ("branch · %s"):format(entry.branch.name)
+    local scope = entry.branch.tag and "tag" or "branch"
+    return ("%s · %s"):format(scope, entry.branch.name)
   elseif entry.kind == "stash" then
     return ("stash · %s"):format(entry.stash.ref)
+  elseif entry.section == "range" then
+    return ("%s · %s"):format(self.range.spec, entry.file.path)
   end
   return ("%s · %s"):format(entry.section, entry.file.path)
 end
@@ -961,21 +1054,144 @@ function Session:jump_hunk(direction)
   end
 end
 
-function Session:mutation_patch()
-  local pane = self:preview_pane()
-  if not pane or not self.current_diff then
+--- Presentation model behind the focused pane, which carries the file spans a
+--- row has to be traced through.
+function Session:preview_model()
+  if not self.current_diff_models then
     return nil
+  end
+  if self.dashboard.preview.layout == "unified" then
+    return self.current_diff_models.unified
+  end
+  return self.current_diff_models.split
+end
+
+local visual_modes = { v = true, V = true, ["\22"] = true }
+
+--- Row span an action should act on: the visual selection when one is active,
+--- otherwise the cursor's own row.
+---
+--- Visual mode is left before the caller runs, because every action here
+--- re-renders the buffer underneath it and a surviving selection would be drawn
+--- against rows that no longer exist.
+local function selected_rows(window)
+  local mode = vim.api.nvim_get_mode().mode
+  if visual_modes[mode:sub(1, 1)] then
+    local anchor = vim.fn.line("v")
+    local cursor = vim.fn.line(".")
+    vim.cmd("normal! \27")
+    return math.min(anchor, cursor), math.max(anchor, cursor)
+  end
+  local row = vim.api.nvim_win_get_cursor(window)[1]
+  return row, row
+end
+
+function Session:mutation_patch()
+  return (self:selection_patch(false))
+end
+
+--- Patch for the current preview scope: the whole hunk under the cursor, or just
+--- the added and removed rows a visual selection covers.
+---
+--- `reverse` is not a presentation detail: narrowing a patch to a subset of rows
+--- has to know which side the target already holds, so staging and unstaging the
+--- same selection produce different patches.
+---@param reverse boolean
+---@return string? patch, string? err
+function Session:selection_patch(reverse)
+  local pane, window = self:preview_pane()
+  if not pane or not self.current_diff then
+    return nil, nil
   end
   if self.current_diff.truncated then
-    notify("Hunk actions are disabled for truncated previews", vim.log.levels.WARN)
-    return nil
+    return nil, "Hunk actions are disabled for truncated previews"
   end
-  local line = vim.api.nvim_win_get_cursor(vim.api.nvim_get_current_win())[1]
-  local unified_start = pane.row_hunks[line]
-  if not unified_start then
-    return nil
+  -- A whitespace-ignoring diff prints the collapsed form of a context line, which
+  -- is not what the index or the worktree holds, so git cannot place the hunk.
+  -- Refusing here is the same call the truncated case makes: the preview is a
+  -- reading aid rather than a faithful patch. Whole files still stage.
+  if self.config.ignore_whitespace then
+    return nil, "Hunk actions are disabled while whitespace is ignored"
   end
-  return diff_backend.patch_at_hunk(self.current_diff.lines, unified_start)
+
+  local first, last = selected_rows(window)
+  if first == last then
+    local unified_start = pane.row_hunks[first]
+    if not unified_start then
+      return nil, nil
+    end
+    return diff_backend.patch_at_hunk(self.current_diff.lines, unified_start), nil
+  end
+
+  local selected = {}
+  local count = 0
+  for row = first, last do
+    local source = pane.unified_rows[row]
+    local kind = pane.source_kinds[row]
+    if source and (kind == "add" or kind == "delete") then
+      selected[source] = true
+      count = count + 1
+    end
+  end
+  if count == 0 then
+    return nil, "The selection covers no added or removed lines"
+  end
+  return diff_backend.patch_for_rows(self.current_diff.lines, selected, { reverse = reverse })
+end
+
+--- File and source line under the preview cursor, so opening a file from a diff
+--- lands where the reader was looking.
+---@return string? path, integer? line
+function Session:preview_location()
+  local pane, window = self:preview_pane()
+  local model = self:preview_model()
+  if not pane or not model or not valid_window(window) then
+    return nil, nil
+  end
+  local row = vim.api.nvim_win_get_cursor(window)[1]
+  local file
+  for _, span in ipairs(model.file_spans or {}) do
+    if span.row > row then
+      break
+    end
+    file = span.file
+  end
+  if not file then
+    return nil, nil
+  end
+  -- An old-side number names a line the current file no longer has, so the new
+  -- side is preferred whenever the layout has one.
+  local number = pane.source_numbers[row]
+  if self.dashboard.preview.layout == "side_by_side" then
+    number = self.current_diff_models.split.right.source_numbers[row] or number
+  end
+  return file.new_path or file.old_path, number or nil
+end
+
+--- Entries a panel action should act on: every entry a visual selection covers,
+--- otherwise just the selected one. Duplicate rows collapse, so a selection that
+--- runs across a section heading does not act on a file twice.
+---@return table[]
+function Session:selected_entries()
+  local panel = self:active_state()
+  local single = { panel.entries[panel.selected] }
+  local ui = self.dashboard and self.dashboard.panels[self.active_panel]
+  if not ui or not valid_window(ui.window) or vim.api.nvim_get_current_win() ~= ui.window then
+    return single
+  end
+  local first, last = selected_rows(ui.window)
+  if first == last then
+    return single
+  end
+  local entries, seen = {}, {}
+  for row = first, last do
+    local entry = panel.row_entries[row]
+    if entry and not seen[entry] then
+      seen[entry] = true
+      entries[#entries + 1] = entry
+    end
+  end
+  return #entries > 0 and entries or single
 end
 
 function Session:jump_diff_file(direction)
@@ -1003,6 +1219,48 @@ function Session:jump_diff_file(direction)
     target = target or pane.file_rows[#pane.file_rows]
   end
   vim.api.nvim_win_set_cursor(window, { target, 0 })
+end
+
+--- Brings a commit into view and selects it, so a blame row or a menu can hand
+--- the reader back to the history they asked about.
+---
+--- The commit may be older than the loaded page, in which case the panel pages
+--- forward until it appears rather than reporting that it is missing.
+---@param oid string
+function Session:reveal_commit(oid)
+  self:focus_panel("commits")
+  local panel = self.panels.commits
+
+  local function select_loaded()
+    for index, entry in ipairs(panel.entries) do
+      if entry.commit and entry.commit.oid == oid then
+        panel.selected = index
+        self:sync_active_aliases()
+        self:update_file_cursor()
+        self:load_preview()
+        self:update_actions()
+        return true
+      end
+    end
+    return false
+  end
+
+  local attempts = 0
+  local function advance()
+    if self.closed or select_loaded() then
+      return
+    end
+    attempts = attempts + 1
+    if not panel.has_more or attempts > 20 then
+      notify(("%s is not in the loaded history"):format(oid:sub(1, 8)), vim.log.levels.WARN)
+      return
+    end
+    self:load_more()
+    -- load_more replaces the panel job; polling for its completion keeps this
+    -- free of a second callback path through the panel loader.
+    vim.defer_fn(advance, 60)
+  end
+  advance()
 end
 
 function Session:toggle_diff_layout()
@@ -1035,9 +1293,34 @@ Session.apply_item = SessionCommands.apply_item
 Session.prompt_commit = SessionCommands.prompt_commit
 Session.load_more = SessionCommands.load_more
 Session.run_remote = SessionCommands.run_remote
+Session.run_remote_args = SessionCommands.run_remote_args
 Session.choose_conflict = SessionCommands.choose_conflict
 Session.run_sequencer = SessionCommands.run_sequencer
 Session.start_operation = SessionCommands.start_operation
+
+Session.revert = SessionGit.revert
+Session.reset = SessionGit.reset
+Session.checkout_commit = SessionGit.checkout_commit
+Session.tag = SessionGit.tag
+Session.interactive_rebase = SessionGit.interactive_rebase
+Session.rename_item = SessionGit.rename_item
+Session.set_upstream = SessionGit.set_upstream
+Session.remote_menu = SessionGit.remote_menu
+Session.stash_menu = SessionGit.stash_menu
+Session.commit_menu = SessionGit.commit_menu
+Session.file_menu = SessionGit.file_menu
+Session.copy_menu = SessionGit.copy_menu
+Session.review = SessionGit.review
+Session.review_upstream = SessionGit.review_upstream
+Session.set_range = SessionGit.set_range
+Session.file_history = SessionGit.file_history
+Session.set_history = SessionGit.set_history
+Session.blame = SessionGit.blame
+Session.blame_path = SessionGit.blame_path
+Session.repos_menu = SessionGit.repos_menu
+Session.toggle_whitespace = SessionGit.toggle_whitespace
+Session.adjust_context = SessionGit.adjust_context
+Session.jump_conflict = SessionGit.jump_conflict
 
 function Session:help_lines()
   return Help.lines(self.config.mappings)
