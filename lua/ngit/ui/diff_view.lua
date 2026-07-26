@@ -75,15 +75,21 @@ local function pane()
     source_numbers = {},
     source_kinds = {},
     row_hunks = {},
+    -- Row in the raw unified diff that produced this display row. Line-level
+    -- staging needs it to name exactly which rows of the patch the user picked,
+    -- and a plain array store per row is the cheapest way to carry it: deriving
+    -- it later would mean rescanning the hunk on every keypress.
+    unified_rows = {},
     file_rows = {},
     highlights = {},
   }
 end
 
-local function append(target, text, number, kind, hunk)
+local function append(target, text, number, kind, hunk, unified_row)
   target.lines[#target.lines + 1] = sanitize(text)
   target.source_numbers[#target.lines] = number or false
   target.source_kinds[#target.lines] = kind or false
+  target.unified_rows[#target.lines] = unified_row or false
   if hunk then
     target.row_hunks[#target.lines] = hunk
   end
@@ -124,6 +130,9 @@ function M.split(diff, opts)
     left = pane(),
     right = pane(),
     files = {},
+    -- Parallel to `files`: which file each header row introduces, so a row can
+    -- be traced back to a path without a second pass over the diff.
+    file_spans = {},
     hunks = {},
   }
 
@@ -143,6 +152,7 @@ function M.split(diff, opts)
   for _, file in ipairs(diff.files or {}) do
     local file_row = #model.left.lines + 1
     model.files[#model.files + 1] = file_row
+    model.file_spans[#model.file_spans + 1] = { row = file_row, file = file }
     model.left.file_rows[#model.left.file_rows + 1] = file_row
     model.right.file_rows[#model.right.file_rows + 1] = file_row
     local label = ("── %s  +%d -%d ──"):format(
@@ -170,8 +180,8 @@ function M.split(diff, opts)
         hunk.new_count,
         hunk.heading ~= "" and ("  " .. hunk.heading) or ""
       )
-      append(model.left, label_hunk, nil, "hunk", hunk.unified_start)
-      append(model.right, label_hunk, nil, "hunk", hunk.unified_start)
+      append(model.left, label_hunk, nil, "hunk", hunk.unified_start, hunk.unified_start)
+      append(model.right, label_hunk, nil, "hunk", hunk.unified_start, hunk.unified_start)
       for _, pair in ipairs(hunk.rows) do
         local left = pair.left
         local right = pair.right
@@ -180,14 +190,16 @@ function M.split(diff, opts)
           left and left.text or "",
           left and left.number or nil,
           left and (left.kind == "change" and "delete" or left.kind) or "filler",
-          hunk.unified_start
+          hunk.unified_start,
+          left and left.unified_row or nil
         )
         append(
           model.right,
           right and right.text or "",
           right and right.number or nil,
           right and (right.kind == "change" and "add" or right.kind) or "filler",
-          hunk.unified_start
+          hunk.unified_start,
+          right and right.unified_row or nil
         )
         if left and right and left.kind == "change" and right.kind == "change" then
           local left_span, right_span = changed_span(left.text, right.text)
@@ -267,33 +279,54 @@ function M.unified(diff, opts, split)
     end
     local left_group = left_line_groups[row]
     local right_group = right_line_groups[row]
+    local left_source = split.left.unified_rows[row]
+    local right_source = split.right.unified_rows[row]
     if left_group == "NgitDiffMeta" then
       append(unified, left, nil, "meta", hunk)
     elseif left_group == "NgitDiffHeader" then
-      append(unified, left, nil, "header", hunk)
+      append(unified, left, nil, "header", hunk, left_source or nil)
       if file_rows[row] then
         unified.file_rows[#unified.file_rows + 1] = #unified.lines
       end
     elseif left_group == "NgitDiffDelete" or left_group == "NgitDiffChange" then
-      append(unified, "- " .. left, left_number, "delete", hunk)
+      append(unified, "- " .. left, left_number, "delete", hunk, left_source or nil)
       append_inline(left_inline[row], 2)
       if right_group == "NgitDiffAdd" or right_group == "NgitDiffChange" then
-        append(unified, "+ " .. right, right_number, "add", hunk)
+        append(unified, "+ " .. right, right_number, "add", hunk, right_source or nil)
         append_inline(right_inline[row], 2)
       end
     elseif right_group == "NgitDiffAdd" then
-      append(unified, "+ " .. right, right_number, "add", hunk)
+      append(unified, "+ " .. right, right_number, "add", hunk, right_source or nil)
       append_inline(right_inline[row], 2)
     elseif left_group == "NgitDiffFiller" and right_group == "NgitDiffFiller" then
       append(unified, left ~= "" and left or right, nil, "filler", hunk)
     else
-      append(unified, "  " .. left, left_number or right_number, nil, hunk)
+      append(
+        unified,
+        "  " .. left,
+        left_number or right_number,
+        nil,
+        hunk,
+        left_source or right_source or nil
+      )
     end
   end
+
+  -- Files appear in the same order in both layouts and each contributes exactly
+  -- one header row, so the split model's file list transfers by index.
+  local file_spans = {}
+  for index, row in ipairs(unified.file_rows) do
+    local span = split.file_spans[index]
+    if span then
+      file_spans[#file_spans + 1] = { row = row, file = span.file }
+    end
+  end
+
   return {
     header = split.header,
     unified = unified,
     files = unified.file_rows,
+    file_spans = file_spans,
     hunks = unified_hunks,
   }
 end

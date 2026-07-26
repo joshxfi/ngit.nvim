@@ -6,9 +6,12 @@ CONTENTS                                                        *ngit-contents*
 1. Introduction...............................................|ngit-introduction|
 2. Commands.........................................................|ngit-commands|
 3. Mappings.........................................................|ngit-mappings|
-4. Configuration.................................................|ngit-configure|
-5. Highlighting................................................|ngit-highlights|
-6. Safety and performance...........................................|ngit-safety|
+4. Review mode.......................................................|ngit-review|
+5. Rewriting history................................................|ngit-rewrite|
+6. Conflicts.....................................................|ngit-conflicts|
+7. Configuration.................................................|ngit-configure|
+8. Highlighting................................................|ngit-highlights|
+9. Safety and performance...........................................|ngit-safety|
 
 ==============================================================================
 1. INTRODUCTION                                               *ngit-introduction*
@@ -52,10 +55,29 @@ Requirements:
 :NGitStashes
         Open ngit and focus the Stashes panel.
 
+                                                              *:NGitReview*
+:NGitReview [range]
+        Open ngit in review mode for [range]. Without an argument, review this
+        branch against its upstream. See |ngit-review|.
+
+                                                              *:NGitBlame*
+:NGitBlame [file]
+        Annotate [file], or the current buffer, with its commit authorship.
+
+                                                              *:NGitHistory*
+:NGitHistory [file]
+        Narrow the Commits panel to the history of [file], or of the current
+        buffer, following it across renames.
+
 ==============================================================================
 3. MAPPINGS                                                       *ngit-mappings*
 
-Mappings are local to ngit-owned buffers.
+Mappings are local to ngit-owned buffers. Every one of them can be rebound, or
+disabled by setting it to false; see |ngit-configure|.
+
+s, u, and X also exist in visual mode. Over the Changes panel a selection acts
+on every file it covers; over the diff it acts on exactly the added and removed
+lines it covers, the way `git add -p` splits a hunk.
 
 q               Close the view.
 r               Refresh status and the selected diff.
@@ -73,16 +95,29 @@ k               Select the previous item in the focused panel.
 [c              Jump to the previous hunk.
 ]f              Jump to the next changed file in the preview.
 [f              Jump to the previous changed file in the preview.
+]x              Jump to the next conflict block in the preview.
+[x              Jump to the previous conflict block in the preview.
 dv              Toggle side-by-side and unified diff layouts.
-s               Stage the selected file, or current hunk in the diff.
-u               Unstage the selected file, or current hunk in the diff.
+dw              Toggle ignoring whitespace-only changes. Hunk and line actions
+                are disabled while it is on, because a collapsed context line
+                is not what the index holds; whole files still stage.
+d+              Widen the diff by three context lines.
+d-              Narrow the diff by three context lines.
+s               Stage the selected file, the hunk under the cursor in the diff,
+                or exactly the lines a visual selection covers.
+u               Unstage the same three scopes.
 a               Stage every change. Applies in the Changes panel.
 A               Unstage every change. Applies in the Changes panel.
 X               Discard the selected change after confirmation. An unstaged
                 file returns to its staged content, a staged file returns to
                 HEAD, and an untracked file is deleted. Conflicts are refused.
-o               Open the selected file.
-/               Filter the file list.
+                In the diff this discards the hunk or the selected lines; an
+                untracked file is only ever discarded whole.
+o               Open the selected file. From the diff, open it at the line
+                under the cursor.
+/               Filter the panel. In Commits, a query naming author:, grep:,
+                path:, since:, until:, or all:true is answered by Git over the
+                whole history; anything else matches the loaded rows.
 <Leader>e       Focus the file panel.
 0               Focus the selected diff.
 ?               Open the key sheet in a floating window.
@@ -90,29 +125,131 @@ gs              Focus Changes.
 gl              Focus paginated Commits.
 gb              Focus local and remote Branches.
 gz              Focus Stashes.
-x               Switch branch, or copy a commit hash.
-n               Create a branch or stash.
+x               Check out the selected branch or tag, or copy a commit hash.
+                Checking out a tag detaches HEAD.
+n               Create a branch at the selection, or a stash. In Commits the
+                new branch starts at the selected commit.
 a               Apply the selected stash. Applies in the Stashes panel.
 p               Pop the selected stash.
-D               Delete a merged local branch or drop a stash.
+D               Delete a branch or tag, or drop a stash. An unmerged branch is
+                refused by Git first, and the refusal offers the forced delete
+                as a separate choice. A remote branch is deleted by pushing an
+                empty ref, in the streaming console.
+gn              Rename the selected branch.
+gu              Set or clear the upstream of a branch.
+t               Create a tag at the selection. An empty message makes it
+                lightweight, any other message makes it annotated.
 L               Load another page of commits.
 c               Create a commit in a gitcommit buffer.
 C               Amend HEAD in a gitcommit buffer.
+gc              Commit options: --signoff, --no-verify, --gpg-sign,
+                --allow-empty, amend --no-edit, reword HEAD, and --fixup or
+                --squash against the selected commit.
+gf              File options: stop tracking, rename through `git mv`, record an
+                untracked file with --intent-to-add, or restore it from a
+                commit.
+gS              Stash options: keep the index, take only the staged half, stash
+                just the selected files, apply or pop restoring the index, or
+                branch from a stash that no longer applies.
 f               Fetch all remotes and prune stale refs.
 U               Pull with fast-forward-only semantics.
-P               Push normally. Force push is not exposed. When the branch has
-                no upstream, ngit offers to push with --set-upstream instead
-                of failing.
-co              Resolve the selected conflict with ours and stage it.
-ct              Resolve the selected conflict with theirs and stage it.
+P               Push normally. When the branch has no upstream, ngit offers to
+                push with --set-upstream instead of failing.
+gm              Remote options: fetch, pull, and push variants including
+                --rebase --autostash and --force-with-lease, plus adding,
+                renaming, and removing a remote. Plain --force is not offered.
+co              Take ours for the conflict: the whole file from the panel, or
+                the block under the cursor from the diff.
+ct              Take theirs, in the same two scopes.
+cb              Take both sides, in the same two scopes.
 gC              Continue an active merge, rebase, cherry-pick, or revert.
 gA              Confirm and abort the active Git operation.
 m               Merge the selected branch into the current branch.
 R               Rebase the current branch onto the selected branch.
+gi              Open an interactive rebase plan, or autosquash. See
+                |ngit-rewrite|.
 v               Cherry-pick the selected commit.
+gv              Revert the selected commit.
+gR              Reset onto the selection, choosing soft, mixed, or hard.
+gx              Check out the selection with a detached HEAD.
+gr              Review a revision range. See |ngit-review|.
+gh              Follow one file's history in the Commits panel.
+gB              Blame the selected file in a float.
+Y               Copy the hash, subject, message, web link, path, or patch.
+gw              Switch to another worktree or submodule, add or remove a
+                worktree, or update every submodule.
 
 ==============================================================================
-4. CONFIGURATION                                                 *ngit-configure*
+4. REVIEW MODE                                                      *ngit-review*
+
+Review mode points the Changes panel at a revision range instead of the working
+tree. Press gr, or run |:NGitReview|, and the panel lists the files that range
+touches under a Range heading while the preview diffs each one across it.
+
+Without an argument the range is this branch against its upstream, falling back
+to origin/HEAD and then to a local main, master, develop, or trunk. The
+three-dot form is always used, so the answer is the work this branch adds rather
+than everything that landed on the base meanwhile.
+
+Range entries have no index and no worktree side, so s, u, and X are refused
+while review mode is active and say so. gr offers the way back out, and the
+panel detail names the range for as long as it is on.
+
+gh follows one file instead: the Commits panel narrows to `git log --follow` for
+that path, and each commit's preview narrows to the same path. gB annotates the
+file with `git blame` in a float, where <CR> on a row reveals that commit in the
+Commits panel, paging the history forward until it is found.
+
+The Commits filter understands server-side queries as well as substrings. A
+filter naming any of author:, grep:, message:, path:, file:, since:, after:,
+until:, before:, or all:true is answered by Git over the whole history; values
+may be quoted. Anything else stays an instant substring match over the rows
+already loaded.
+
+==============================================================================
+5. REWRITING HISTORY                                               *ngit-rewrite*
+
+gi opens an interactive rebase plan: one row per commit, oldest first, with p, r,
+e, s, f, and d setting pick, reword, edit, squash, fixup, and drop, <Tab> cycling
+through them, J and K reordering, and <C-s> running the result.
+
+reword has no todo verb that carries a new message, and driving an editor from
+inside an asynchronous job is not something ngit will do, so a reword becomes a
+pick followed by `break`. The rebase stops with that commit at HEAD, where C
+amends it and gC continues. edit stops the same way with the commit applied. A
+squash keeps Git's combined message; amend it afterwards if that is not what you
+wanted.
+
+gi also offers autosquash, which lets Git build the todo itself so that fixup!
+and squash! subjects fold into the commits they name. gc creates those commits:
+it offers `--fixup` and `--squash` against the selected commit, alongside
+--signoff, --no-verify, --gpg-sign, --allow-empty, amend --no-edit, and
+rewording HEAD.
+
+gR resets onto the selection, naming what each mode keeps; a hard reset is
+confirmed separately. gv reverts the selected commit. gx checks a commit out with
+a detached HEAD.
+
+Rewritten history cannot be pushed with a plain push. gm offers
+`--force-with-lease`, which refuses when the remote has moved since the last
+fetch. Plain --force is not offered at all.
+
+==============================================================================
+6. CONFLICTS                                                     *ngit-conflicts*
+
+co, ct, and cb take ours, theirs, or both sides. Pressed in the Changes panel
+they act on the whole file; pressed in the diff they resolve only the conflict
+block the cursor sits in, so one file can take ours here and theirs there. ]x
+and [x move between the blocks.
+
+Taking a side for a whole file goes through `git checkout --ours`, which restores
+the recorded stage exactly, including a file one side deleted. The per-block form
+rewrites the file, preserving whether it ended with a newline, and stages it only
+once no markers are left, so a partly resolved file is never marked resolved.
+Both diff3 and merge marker styles are understood.
+
+==============================================================================
+7. CONFIGURATION                                                 *ngit-configure*
 
 Configuration is optional. Defaults work without calling setup().
 
@@ -133,11 +270,13 @@ Configuration is optional. Defaults work without calling setup().
     hide_statusline = true,
     auto_refresh = true,
     confirm_discard = true,
+    ignore_whitespace = false,
   })
 <
 
 context
-        Number of context lines generated around each diff hunk.
+        Number of context lines generated around each diff hunk. d+ and d-
+        adjust it for the open view without changing this default.
 
 debounce_ms
         Delay before loading a newly selected file diff.
@@ -194,14 +333,25 @@ confirm_discard
         Ask before discarding. The prompt names the exact effect, which
         depends on the section the file is selected in.
 
+ignore_whitespace
+        Start with whitespace-only changes collapsed, as `dw` toggles.
+        --ignore-space-change is used rather than --ignore-all-space, so a
+        change in indentation is still shown: in an indentation-sensitive
+        language that is a change in meaning, not noise. Either form prints the
+        collapsed text of a demoted line, which Git cannot then place, so hunk
+        and line actions are disabled while the option is on.
+
 signs
-        Text displayed for each file state.
+        Text displayed for each file state, including `range` for the rows
+        review mode lists.
 
 mappings
-        Buffer-local mappings. Set a mapping to false to disable it.
+        Buffer-local mappings. Set a mapping to false to disable it. Actions
+        reached through a menu are mapped and listed under `?` but kept out of
+        the one-line footer, which has room only for the everyday keys.
 
 ==============================================================================
-5. HIGHLIGHTING                                               *ngit-highlights*
+8. HIGHLIGHTING                                               *ngit-highlights*
 
 Diff lines use NgitDiffAdd, NgitDiffDelete, and NgitDiffChange. Changed text
 within a line uses NgitDiffAddText or NgitDiffDeleteText.
@@ -227,8 +377,10 @@ NgitBranchLocal, NgitBranchRemote, NgitUpstream, NgitStashRef, NgitPath, and
 NgitPathDim for the leading directories of a path. Commit metadata above a
 patch uses NgitDiffMeta, and source line numbers use NgitLineNr.
 File markers use the foreground-only NgitStagedSign, NgitUnstagedSign,
-NgitUntrackedSign, and NgitConflictSign groups; the matching section headings
-reuse them through NgitStaged, NgitUnstaged, NgitUntracked, and NgitConflict.
+NgitUntrackedSign, NgitConflictSign, and NgitRangeSign groups; the matching
+section headings reuse them through NgitStaged, NgitUnstaged, NgitUntracked,
+NgitConflict, and NgitRange. Review rows take a muted accent, because unlike the
+other four they are read-only.
 Panel headers read "[2] Branches", where the bracketed number is the key that
 focuses that panel. They use NgitPanelActive, NgitPanelIndex, NgitPanelMarker,
 NgitPanelMarkerIdle, and NgitPanelCount; the index and title stay muted until
@@ -242,11 +394,28 @@ recomputed after :colorscheme while they remain ngit-owned; an explicit user
 override is preserved.
 
 ==============================================================================
-6. SAFETY AND PERFORMANCE                                         *ngit-safety*
+9. SAFETY AND PERFORMANCE                                         *ngit-safety*
 
 Git is invoked asynchronously with argument arrays and literal pathspecs.
 Read-only commands avoid optional repository locks. Status is parsed from
 NUL-delimited porcelain-v2 output.
+
+--literal-pathspecs is what keeps a file called `:(top)name.txt` from being read
+as pathspec magic. A few porcelain commands build pathspecs of their own, though:
+`git stash push --keep-index` runs an internal checkout against `:/`, which the
+literal flag makes Git reject. Those callers opt out of the flag and mark their
+own paths with the per-pathspec `:(literal)` prefix instead, so the guarantee is
+unchanged.
+
+Narrowing a patch to a hunk or to selected lines rewrites the rows that were not
+chosen rather than dropping them: whichever side the target already holds has to
+survive as context, and whichever side it does not must disappear. Staging and
+unstaging the same selection therefore produce different patches. The rows are
+also re-paired, because Git prints every removal of a change block before every
+addition; emitting them in stream order would place a kept line after the context
+its neighbours turned into, and the staged file would carry it in the wrong
+place. Splitting a whole-file addition or deletion is refused outright, since
+reversing a creation rewrites the whole file rather than a range inside it.
 
 Changes, branches, commits, and stashes load independently and asynchronously.
 Only the active panel's selected file, commit, branch, or stash preview is
@@ -271,9 +440,18 @@ Every discard is confirmed and states its exact effect, deleting an untracked
 file only when that is what was asked for. A file with unsaved changes in a
 loaded buffer is never overwritten, and buffers are rechecked after any
 mutation. Renames are acted on through both of their paths so no half-staged
-entry is left behind. Branch deletion uses Git's merged-only behavior, pull is
-fast-forward-only, and force push is not exposed. Remote progress appears in
-a cancellable floating console.
+entry is left behind. Branch deletion asks Git first and only offers the forced
+form once Git has reported the branch unmerged, naming what would be lost. The
+default pull is fast-forward-only. The only forcing push offered is
+--force-with-lease, which refuses when the remote moved since the last fetch;
+plain --force is not exposed. Deleting a remote branch says that it affects
+everyone using it. Remote progress appears in a cancellable floating console.
+
+Review mode is read-only by construction: a revision range has no index and no
+worktree side, so staging and discarding are refused there rather than passed to
+Git. Resolving one conflict block at a time stages the file only once no markers
+remain, so a partly resolved file is never marked resolved, and the rewrite
+preserves whether the file ended with a newline.
 
 Failures report what Git actually said. Several ordinary refusals arrive on
 standard output rather than standard error, so both are considered before

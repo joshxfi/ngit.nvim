@@ -5,6 +5,7 @@ local mutate = require("ngit.git.mutate")
 local remote_backend = require("ngit.git.remote")
 local sequencer_backend = require("ngit.git.sequencer")
 local stash_backend = require("ngit.git.stash")
+local Steps = require("ngit.util.steps")
 
 local M = {}
 
@@ -40,6 +41,35 @@ local function entry_paths(entry)
     return { entry.file.path, entry.file.old_path }
   end
   return { entry.file.path }
+end
+
+--- Deduplicated paths of the accepted entries. A multi-row selection can name
+--- the same file twice, once staged and once unstaged, and passing a path twice
+--- to a pathspec makes Git do the work twice.
+local function collect_paths(entries, accept)
+  local paths, seen = {}, {}
+  for _, entry in ipairs(entries) do
+    if entry.file and (not accept or accept(entry)) then
+      for _, path in ipairs(entry_paths(entry)) do
+        if not seen[path] then
+          seen[path] = true
+          paths[#paths + 1] = path
+        end
+      end
+    end
+  end
+  return paths
+end
+
+local function group_by_section(entries)
+  local groups = {}
+  for _, entry in ipairs(entries) do
+    if entry.file and entry.section then
+      groups[entry.section] = groups[entry.section] or {}
+      table.insert(groups[entry.section], entry)
+    end
+  end
+  return groups
 end
 
 function M.after_mutation(self, ok, err)
@@ -79,47 +109,89 @@ local function confirm(self, prompt, label, perform)
 end
 
 function M.stage(self)
-  if self.active_panel ~= "status" then
+  if self.active_panel ~= "status" or self:review_only() then
     return
   end
-  local entry = self:selected_entry()
-  if not entry or entry.section == "staged" then
+  local entries = self:selected_entries()
+  if #entries == 0 then
     return
   end
-  local patch = entry.section == "unstaged" and self:mutation_patch() or nil
-  if patch then
-    mutate.apply_cached(self.root, patch, false, function(ok, err)
-      M.after_mutation(self, ok, err)
-    end)
-  else
-    mutate.stage_file(self.root, entry_paths(entry), function(ok, err)
-      M.after_mutation(self, ok, err)
-    end)
+  local function settle(ok, err)
+    M.after_mutation(self, ok, err)
   end
+
+  if #entries > 1 then
+    local paths = collect_paths(entries, function(entry)
+      return entry.section ~= "staged"
+    end)
+    if #paths == 0 then
+      notify("Every selected change is already staged")
+      return
+    end
+    mutate.stage_file(self.root, paths, settle)
+    return
+  end
+
+  local entry = entries[1]
+  if entry.section == "staged" then
+    return
+  end
+  if entry.section == "unstaged" then
+    local patch, err = self:selection_patch(false)
+    if err then
+      notify(err, vim.log.levels.WARN)
+      return
+    end
+    if patch then
+      mutate.apply(self.root, patch, { target = "index" }, settle)
+      return
+    end
+  end
+  mutate.stage_file(self.root, entry_paths(entry), settle)
 end
 
 function M.unstage(self)
-  if self.active_panel ~= "status" then
+  if self.active_panel ~= "status" or self:review_only() then
     return
   end
-  local entry = self:selected_entry()
-  if not entry or entry.section ~= "staged" then
+  local entries = self:selected_entries()
+  if #entries == 0 then
     return
   end
-  local patch = self:mutation_patch()
+  local function settle(ok, err)
+    M.after_mutation(self, ok, err)
+  end
+
+  if #entries > 1 then
+    local paths = collect_paths(entries, function(entry)
+      return entry.section == "staged"
+    end)
+    if #paths == 0 then
+      notify("None of the selected changes are staged", vim.log.levels.WARN)
+      return
+    end
+    mutate.unstage_file(self.root, paths, settle)
+    return
+  end
+
+  local entry = entries[1]
+  if entry.section ~= "staged" then
+    return
+  end
+  local patch, err = self:selection_patch(true)
+  if err then
+    notify(err, vim.log.levels.WARN)
+    return
+  end
   if patch then
-    mutate.apply_cached(self.root, patch, true, function(ok, err)
-      M.after_mutation(self, ok, err)
-    end)
-  else
-    mutate.unstage_file(self.root, entry_paths(entry), function(ok, err)
-      M.after_mutation(self, ok, err)
-    end)
+    mutate.apply(self.root, patch, { reverse = true, target = "index" }, settle)
+    return
   end
+  mutate.unstage_file(self.root, entry_paths(entry), settle)
 end
 
 function M.stage_all(self)
-  if self.active_panel ~= "status" then
+  if self.active_panel ~= "status" or self:review_only() then
     return
   end
   mutate.stage_all(self.root, function(ok, err)
@@ -128,7 +200,7 @@ function M.stage_all(self)
 end
 
 function M.unstage_all(self)
-  if self.active_panel ~= "status" then
+  if self.active_panel ~= "status" or self:review_only() then
     return
   end
   mutate.unstage_all(self.root, function(ok, err)
@@ -136,21 +208,109 @@ function M.unstage_all(self)
   end)
 end
 
+--- Discards a mixed selection. Each section needs a different command, so the
+--- groups run in sequence and the first failure is what gets reported.
+local function discard_many(self, entries, settle)
+  local groups = group_by_section(entries)
+  if groups.conflict then
+    notify("Leave the conflicted files out of the selection", vim.log.levels.WARN)
+    return
+  end
+  local paths = collect_paths(entries)
+  if #paths == 0 or not worktree_is_safe(self, paths) then
+    return
+  end
+
+  local staged = groups.staged and collect_paths(groups.staged) or {}
+  local unstaged = groups.unstaged and collect_paths(groups.unstaged) or {}
+  local untracked = groups.untracked and collect_paths(groups.untracked) or {}
+
+  local summary = {}
+  if #staged > 0 then
+    summary[#summary + 1] = ("%d staged"):format(#staged)
+  end
+  if #unstaged > 0 then
+    summary[#summary + 1] = ("%d unstaged"):format(#unstaged)
+  end
+  if #untracked > 0 then
+    summary[#summary + 1] = ("%d untracked (deleted)"):format(#untracked)
+  end
+
+  confirm(
+    self,
+    ("Discard %s? This cannot be undone."):format(table.concat(summary, ", ")),
+    "Discard",
+    function()
+      local steps = {}
+      if #staged > 0 then
+        steps[#steps + 1] = function(done)
+          mutate.discard_all_changes(self.root, staged, done)
+        end
+      end
+      if #unstaged > 0 then
+        steps[#steps + 1] = function(done)
+          mutate.discard_file(self.root, unstaged, done)
+        end
+      end
+      if #untracked > 0 then
+        steps[#steps + 1] = function(done)
+          mutate.remove_untracked(self.root, untracked, done)
+        end
+      end
+      Steps.run(steps, settle)
+    end
+  )
+end
+
 function M.discard(self)
-  if self.active_panel ~= "status" then
+  if self.active_panel ~= "status" or self:review_only() then
     return
   end
-  local entry = self:selected_entry()
-  if not entry then
+  local entries = self:selected_entries()
+  if #entries == 0 then
     return
   end
+  local function settle(ok, err)
+    M.after_mutation(self, ok, err)
+  end
+  if #entries > 1 then
+    discard_many(self, entries, settle)
+    return
+  end
+
+  local entry = entries[1]
   if entry.section == "conflict" then
     notify("Resolve the conflict with ours/theirs, or abort the operation", vim.log.levels.WARN)
     return
   end
 
+  -- Hunk or line scope, when the action was invoked from the diff pane. An
+  -- untracked file has no old side to restore a range from, so it is only ever
+  -- discarded whole.
+  local patch, patch_err
+  if entry.section ~= "untracked" then
+    patch, patch_err = self:selection_patch(true)
+    if patch_err then
+      notify(patch_err, vim.log.levels.WARN)
+      return
+    end
+  end
+
   local paths = entry_paths(entry)
   if not worktree_is_safe(self, paths) then
+    return
+  end
+
+  if patch then
+    local target = entry.section == "staged" and "both" or "worktree"
+    confirm(
+      self,
+      ("Discard the selected change in %s?"):format(entry.file.path),
+      "Discard",
+      function()
+        mutate.apply(self.root, patch, { reverse = true, target = target }, settle)
+      end
+    )
     return
   end
 
@@ -185,21 +345,36 @@ function M.discard(self)
   end
 end
 
+--- Opens the reviewed file. Invoked from the diff it uses the path and source
+--- line under the cursor, so `o` lands where the reader was looking rather than
+--- at the top of the file; invoked from the panel it opens the selected entry.
 function M.open_file(self)
-  if self.active_panel ~= "status" then
-    return
+  local path, line = self:preview_location()
+  if not path then
+    if self.active_panel ~= "status" then
+      return
+    end
+    local entry = self:selected_entry()
+    if not entry then
+      return
+    end
+    path = entry.file.path
   end
-  local entry = self:selected_entry()
-  if not entry then
-    return
-  end
-  local path = vim.fs.joinpath(self.root, entry.file.path)
-  if not vim.uv.fs_stat(path) then
+
+  local absolute = vim.fs.joinpath(self.root, path)
+  if not vim.uv.fs_stat(absolute) then
     notify("The selected file does not exist in the worktree", vim.log.levels.WARN)
     return
   end
   self:close()
-  vim.cmd.edit(vim.fn.fnameescape(path))
+  vim.cmd.edit(vim.fn.fnameescape(absolute))
+  if line then
+    -- A file whose worktree copy has moved on may be shorter than the diff said,
+    -- so an out-of-range line is not an error worth reporting.
+    if pcall(vim.api.nvim_win_set_cursor, 0, { line, 0 }) then
+      vim.cmd("normal! zz")
+    end
+  end
 end
 
 function M.prompt_filter(self)
@@ -244,16 +419,34 @@ function M.primary_action(self)
   end
 end
 
-function M.new_item(self)
-  if self.active_panel == "branches" then
-    vim.ui.input({ prompt = "New branch: " }, function(name)
-      if not name or name == "" or self.closed then
-        return
-      end
-      branch_backend.create(self.root, name, function(ok, err)
-        M.after_mutation(self, ok, err)
-      end)
+--- Creates a branch. The start point is whatever the reader is pointing at, so
+--- `n` on a commit branches from that commit rather than silently from HEAD, and
+--- the prompt says which.
+local function new_branch(self, start_point, label)
+  local prompt = start_point and ("New branch at %s: "):format(label) or "New branch: "
+  vim.ui.input({ prompt = prompt }, function(name)
+    if not name or name == "" or self.closed then
+      return
+    end
+    branch_backend.create(self.root, name, start_point, function(ok, err)
+      M.after_mutation(self, ok, err)
     end)
+  end)
+end
+
+function M.new_item(self)
+  local entry = self:selected_entry()
+  if self.active_panel == "commits" then
+    if not entry then
+      return
+    end
+    new_branch(self, entry.commit.oid, entry.commit.oid:sub(1, 8))
+  elseif self.active_panel == "branches" then
+    if entry and entry.kind == "branch" and not entry.branch.current then
+      new_branch(self, entry.branch.refname, entry.branch.name)
+    else
+      new_branch(self, nil, nil)
+    end
   elseif self.active_panel == "stashes" then
     vim.ui.input({ prompt = "Stash message (optional): " }, function(message)
       if message == nil or self.closed then
@@ -266,26 +459,85 @@ function M.new_item(self)
   end
 end
 
+--- Deleting an unmerged branch is refused by git rather than by ngit, and the
+--- refusal is the prompt: it names the branch as unmerged and offers the forced
+--- delete as a second, explicit choice.
+local function delete_branch(self, name)
+  branch_backend.delete(self.root, name, false, function(ok, err)
+    if ok then
+      M.after_mutation(self, true, nil)
+      return
+    end
+    local unmerged = (err or ""):find("not fully merged", 1, true)
+    if not unmerged then
+      M.after_mutation(self, false, err)
+      return
+    end
+    vim.ui.select({ "Cancel", "Delete anyway" }, {
+      prompt = ("%s is not fully merged. Delete it and lose its commits?"):format(name),
+    }, function(choice)
+      if choice ~= "Delete anyway" then
+        self:set_result(err, false)
+        return
+      end
+      branch_backend.delete(self.root, name, true, function(forced, force_err)
+        M.after_mutation(self, forced, force_err)
+      end)
+    end)
+  end)
+end
+
+local function delete_remote_branch(self, entry)
+  local remote, branch = branch_backend.split_remote(entry.branch.name)
+  if not remote then
+    notify("This ref does not name a remote to delete from", vim.log.levels.WARN)
+    return
+  end
+  vim.ui.select({ "Cancel", "Delete on the remote" }, {
+    prompt = ("Delete %s from %s? This affects everyone using it."):format(branch, remote),
+  }, function(choice)
+    if choice ~= "Delete on the remote" then
+      return
+    end
+    M.run_remote_args(
+      self,
+      branch_backend.delete_remote_args(remote, branch),
+      ("git push --delete %s %s"):format(remote, branch)
+    )
+  end)
+end
+
 function M.delete_item(self)
   local entry = self:selected_entry()
   if not entry then
     return
   end
   if entry.kind == "branch" then
-    if entry.branch.remote then
-      notify("Deleting remote branches is not supported yet", vim.log.levels.WARN)
+    if entry.branch.tag then
+      vim.ui.select({ "Cancel", "Delete" }, {
+        prompt = ("Delete the tag %s?"):format(entry.branch.name),
+      }, function(choice)
+        if choice == "Delete" then
+          branch_backend.delete_tag(self.root, entry.branch.name, function(ok, err)
+            M.after_mutation(self, ok, err)
+          end)
+        end
+      end)
       return
-    elseif entry.branch.current then
+    end
+    if entry.branch.remote then
+      delete_remote_branch(self, entry)
+      return
+    end
+    if entry.branch.current then
       notify("The current branch cannot be deleted", vim.log.levels.WARN)
       return
     end
     vim.ui.select({ "Cancel", "Delete" }, {
-      prompt = ("Delete merged branch %s?"):format(entry.branch.name),
+      prompt = ("Delete branch %s?"):format(entry.branch.name),
     }, function(choice)
       if choice == "Delete" then
-        branch_backend.delete(self.root, entry.branch.name, false, function(ok, err)
-          M.after_mutation(self, ok, err)
-        end)
+        delete_branch(self, entry.branch.name)
       end
     end)
   elseif entry.kind == "stash" then
@@ -324,10 +576,17 @@ local function staged_summary(status)
   return staged, conflicts
 end
 
-function M.prompt_commit(self, amend)
+--- `options` is a bare boolean for the plain commit and amend keys, and the table
+--- form when the commit menu has chosen switches.
+---@param self table
+---@param options boolean|NgitCommitOptions
+function M.prompt_commit(self, options)
   if self.active_panel ~= "status" then
     return
   end
+  local commit_options = type(options) == "table" and vim.deepcopy(options)
+    or { amend = options == true }
+  local amend = commit_options.amend == true
   if self.commit_editor and not self.commit_editor.closed then
     if valid_window(self.commit_editor.window) then
       vim.api.nvim_set_current_win(self.commit_editor.window)
@@ -398,10 +657,8 @@ function M.load_more(self)
   local request = panel.request
   local existing = #(panel.data or {})
   local job
-  job = log_backend.list(self.root, {
-    limit = self.config.commit_limit,
-    skip = existing,
-  }, function(items, has_more, err)
+  local options = require("ngit.ui.session_refresh").commit_options(self, existing)
+  job = log_backend.list(self.root, options, function(items, has_more, err)
     if panel.job == job then
       panel.job = nil
     end
@@ -426,13 +683,20 @@ local command_labels = {
   push = "git push",
 }
 
-function M.run_remote(self, operation)
+--- Runs a network command in a streaming console.
+---
+--- Every variant the remote menu offers arrives here, so the console header shows
+--- the exact command rather than a friendly name for it, and the missing-upstream
+--- retry covers any push rather than only the default one.
+---@param args string[]
+---@param label string
+function M.run_remote_args(self, args, label)
   if self.remote_console and self.remote_console.running then
     notify("A remote operation is already running", vim.log.levels.WARN)
     return
   end
   local Console = require("ngit.ui.console")
-  local console = Console.new(command_labels[operation])
+  local console = Console.new(label)
   self.remote_console = console
 
   local transcript = {}
@@ -443,10 +707,7 @@ function M.run_remote(self, operation)
 
   local function settle(ok, code)
     console:finish(ok, code)
-    self:set_result(
-      ok and (operation .. " completed") or (operation .. (" failed (%d)"):format(code)),
-      ok
-    )
+    self:set_result(ok and (label .. " completed") or (label .. (" failed (%d)"):format(code)), ok)
     if self.remote_console == console then
       self.remote_console = nil
     end
@@ -455,12 +716,12 @@ function M.run_remote(self, operation)
     end
   end
 
-  console.process = remote_backend.run(self.root, operation, on_chunk, function(ok, result)
+  console.process = remote_backend.stream(self.root, args, on_chunk, function(ok, result)
     -- A first push from a fresh branch fails purely because no upstream is set.
     -- Offering to set it here saves dropping to a shell for the common case.
     if
       ok
-      or operation ~= "push"
+      or args[1] ~= "push"
       or self.closed
       or not remote_backend.missing_upstream(table.concat(transcript))
     then
@@ -496,6 +757,18 @@ function M.run_remote(self, operation)
   end)
 end
 
+function M.run_remote(self, operation)
+  M.run_remote_args(self, remote_backend.operations[operation], command_labels[operation])
+end
+
+--- Takes a side for a conflict.
+---
+--- Invoked from the diff it resolves the one block the cursor sits in, so a file
+--- with several conflicts can take ours here and theirs there; invoked from the
+--- panel it takes that side for the whole file. Only the whole-file case can go
+--- through `git checkout --ours`, which restores the recorded stage exactly,
+--- including a file one side deleted.
+---@param side "ours"|"theirs"|"both"
 function M.choose_conflict(self, side)
   if self.active_panel ~= "status" then
     return
@@ -504,9 +777,19 @@ function M.choose_conflict(self, side)
   if not entry or entry.section ~= "conflict" then
     return
   end
-  conflict_backend.choose(self.root, entry.file.path, side, function(ok, err)
+  local function settle(ok, err)
     M.after_mutation(self, ok, err)
-  end)
+  end
+  if not worktree_is_safe(self, { entry.file.path }) then
+    return
+  end
+
+  local _, line = self:preview_location()
+  if line then
+    conflict_backend.resolve(self.root, entry.file.path, side, line, settle)
+    return
+  end
+  conflict_backend.choose(self.root, entry.file.path, side, settle)
 end
 
 function M.run_sequencer(self, action)

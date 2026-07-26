@@ -307,7 +307,15 @@ function M.parse(text, max_bytes, forced_truncation)
   }
 end
 
-local function args_for(section, path, context)
+--- `--ignore-space-change` rather than `--ignore-all-space`: the weaker form
+--- collapses runs of whitespace but still shows a change in indentation, which in
+--- an indentation-sensitive language is a change in meaning and not noise.
+---
+--- Either form prints the collapsed text of a line it demoted to context, so the
+--- result reads correctly but cannot be handed to `git apply`. The session
+--- disables hunk and line actions while the option is on for that reason; whole
+--- files are unaffected, because staging one never goes through a patch.
+local function args_for(section, path, context, opts)
   local args = {
     "diff",
     "--no-color",
@@ -317,6 +325,9 @@ local function args_for(section, path, context)
     "--dst-prefix=b/",
     ("--unified=%d"):format(context),
   }
+  if opts and opts.ignore_whitespace then
+    args[#args + 1] = "--ignore-space-change"
+  end
   if section == "staged" then
     args[#args + 1] = "--cached"
   elseif section == "untracked" then
@@ -343,9 +354,10 @@ end
 ---@param context integer
 ---@param max_bytes integer
 ---@param callback fun(diff: NgitDiff?, err: string?)
+---@param opts? { ignore_whitespace?: boolean }
 ---@return vim.SystemObj?
-function M.load(root, section, path, context, max_bytes, callback)
-  return runner.run(args_for(section, path, context), {
+function M.load(root, section, path, context, max_bytes, callback, opts)
+  return runner.run(args_for(section, path, context, opts), {
     cwd = root,
     max_stdout_bytes = max_bytes,
   }, function(result)
@@ -358,42 +370,302 @@ function M.load(root, section, path, context, max_bytes, callback)
   end)
 end
 
+--- Header block of the file that encloses `row`: the `diff --git` line through
+--- the line before that file's first hunk.
+---
+--- Searching backwards from the row rather than taking the first header in the
+--- stream is what makes hunk actions correct in a multi-file preview, and what
+--- keeps a commit's author/date/message preamble out of the generated patch.
+---@param lines string[]
+---@param row integer
+---@return integer first, integer last
+local function file_header_range(lines, row)
+  local first = 1
+  for index = math.min(row, #lines), 1, -1 do
+    if vim.startswith(lines[index], "diff --git ") then
+      first = index
+      break
+    end
+  end
+  local last = first - 1
+  for index = first, #lines do
+    local line = lines[index]
+    if vim.startswith(line, "@@") then
+      break
+    end
+    if index > first and vim.startswith(line, "diff --git ") then
+      break
+    end
+    last = index
+  end
+  return first, last
+end
+
+--- The hunk at or immediately before `row`, as a half-open row span.
+---@param lines string[]
+---@param row integer
+---@return integer? first, integer? last
+local function hunk_range(lines, row)
+  local first
+  for index = math.min(row, #lines), 1, -1 do
+    local line = lines[index]
+    if vim.startswith(line, "@@") then
+      first = index
+      break
+    end
+    if vim.startswith(line, "diff --git ") then
+      return nil, nil
+    end
+  end
+  if not first then
+    return nil, nil
+  end
+  local last = #lines
+  for index = first + 1, #lines do
+    if vim.startswith(lines[index], "@@") or vim.startswith(lines[index], "diff --git ") then
+      last = index - 1
+      break
+    end
+  end
+  return first, last
+end
+
 ---@param lines string[]
 ---@param cursor_line integer
 ---@return string?
 function M.patch_at_hunk(lines, cursor_line)
-  local header_end
-  local selected_hunk
-  for index, line in ipairs(lines) do
-    if vim.startswith(line, "@@") then
-      header_end = header_end or (index - 1)
-      if index <= cursor_line then
-        selected_hunk = index
-      elseif selected_hunk then
-        break
-      end
-    end
-  end
-  if not selected_hunk or not header_end then
+  local hunk_first, hunk_last = hunk_range(lines, cursor_line)
+  if not hunk_first then
     return nil
   end
-
-  local next_hunk = #lines + 1
-  for index = selected_hunk + 1, #lines do
-    if vim.startswith(lines[index], "@@") or vim.startswith(lines[index], "diff --git ") then
-      next_hunk = index
-      break
-    end
-  end
-
+  local header_first, header_last = file_header_range(lines, hunk_first)
   local patch = {}
-  for index = 1, header_end do
+  for index = header_first, header_last do
     patch[#patch + 1] = lines[index]
   end
-  for index = selected_hunk, next_hunk - 1 do
+  for index = hunk_first, hunk_last do
     patch[#patch + 1] = lines[index]
   end
   return table.concat(patch, "\n") .. "\n"
+end
+
+--- Every `diff --git` block in a unified diff, as header and body row spans. A
+--- stream carrying no header at all — `--no-index` output for an untracked file
+--- — is reported as a single block whose header runs up to the first hunk.
+---@param lines string[]
+---@return { header_first: integer, header_last: integer, body_last: integer }[]
+local function file_blocks(lines)
+  local blocks = {}
+  local index = 1
+  while index <= #lines do
+    if vim.startswith(lines[index], "diff --git ") then
+      local header_last = index
+      local scan = index + 1
+      while
+        scan <= #lines
+        and not vim.startswith(lines[scan], "@@")
+        and not vim.startswith(lines[scan], "diff --git ")
+      do
+        header_last = scan
+        scan = scan + 1
+      end
+      local body_last = header_last
+      while scan <= #lines and not vim.startswith(lines[scan], "diff --git ") do
+        body_last = scan
+        scan = scan + 1
+      end
+      blocks[#blocks + 1] =
+        { header_first = index, header_last = header_last, body_last = body_last }
+      index = scan
+    else
+      index = index + 1
+    end
+  end
+  if #blocks == 0 then
+    local header_first, header_last = file_header_range(lines, 1)
+    blocks[1] = { header_first = header_first, header_last = header_last, body_last = #lines }
+  end
+  return blocks
+end
+
+--- Rewrites one hunk down to the selected rows, the way `git add -p` splits one.
+---
+--- A patch applies old→new, so rows that are *not* selected have to be rewritten
+--- rather than simply dropped: whichever side already exists in the target must
+--- survive as context, and whichever side does not must disappear. Applying
+--- forward the target holds the old side, so an unselected `-` becomes context
+--- and an unselected `+` is dropped; reversing, the target holds the new side, so
+--- the two swap. Getting this backwards silently corrupts the file.
+---
+--- The rows also have to be re-paired. Git prints every removal of a change
+--- block before every addition, so the i-th removal is the counterpart of the
+--- i-th addition; emitting in stream order would place a kept addition after the
+--- context lines its unselected neighbours turned into, and the staged file would
+--- carry the line in the wrong place.
+---@return string[]? rows, integer old_count, integer new_count, integer selected, integer total
+local function narrow_hunk(lines, hunk_first, hunk_last, selected, reverse)
+  local rows = {}
+  local old_count, new_count, changes, total = 0, 0, 0, 0
+  local deleted, added = {}, {}
+  -- A "\ No newline at end of file" describes where a side stops. Left in front
+  -- of a row that is still to come it would claim the file ends mid-hunk, so a
+  -- marker whose owner was rewritten as context waits until nothing follows it.
+  local deferred_marker, deferred_at
+
+  local function emit(text)
+    rows[#rows + 1] = text
+  end
+
+  local function defer(marker)
+    deferred_marker = marker
+    deferred_at = #rows
+  end
+
+  local function flush()
+    for index = 1, math.max(#deleted, #added) do
+      local removal = deleted[index]
+      local addition = added[index]
+      if removal then
+        if selected[removal.row] then
+          emit(removal.line)
+          old_count = old_count + 1
+          changes = changes + 1
+          if removal.marker then
+            emit(removal.marker)
+          end
+        elseif not reverse then
+          emit(" " .. removal.text)
+          old_count = old_count + 1
+          new_count = new_count + 1
+          if removal.marker then
+            defer(removal.marker)
+          end
+        end
+      end
+      if addition then
+        if selected[addition.row] then
+          emit(addition.line)
+          new_count = new_count + 1
+          changes = changes + 1
+          if addition.marker then
+            emit(addition.marker)
+          end
+        elseif reverse then
+          emit(" " .. addition.text)
+          old_count = old_count + 1
+          new_count = new_count + 1
+          if addition.marker then
+            defer(addition.marker)
+          end
+        end
+      end
+    end
+    deleted, added = {}, {}
+  end
+
+  for scan = hunk_first + 1, hunk_last do
+    local line = lines[scan]
+    local prefix = line:sub(1, 1)
+    if prefix == "-" then
+      total = total + 1
+      deleted[#deleted + 1] = { row = scan, line = line, text = line:sub(2) }
+    elseif prefix == "+" then
+      total = total + 1
+      added[#added + 1] = { row = scan, line = line, text = line:sub(2) }
+    elseif prefix == "\\" then
+      local owner = added[#added] or deleted[#deleted]
+      if owner then
+        owner.marker = line
+      else
+        emit(line)
+      end
+    else
+      flush()
+      -- Context. Git writes a bare space for a blank line, but a stream that has
+      -- been through an editor may have lost it.
+      emit(line == "" and " " or line)
+      old_count = old_count + 1
+      new_count = new_count + 1
+    end
+  end
+  flush()
+  if deferred_marker and deferred_at == #rows then
+    emit(deferred_marker)
+  end
+
+  if changes == 0 then
+    return nil, 0, 0, 0, total
+  end
+  return rows, old_count, new_count, changes, total
+end
+
+--- Builds a patch carrying only the selected change rows, across as many files
+--- of the preview as the selection touches.
+---@param lines string[] unified diff the preview was built from
+---@param selected table<integer, boolean> unified rows the user picked
+---@param opts? { reverse?: boolean }
+---@return string? patch, string? err
+function M.patch_for_rows(lines, selected, opts)
+  opts = opts or {}
+  local reverse = opts.reverse == true
+  local patch = {}
+
+  for _, block in ipairs(file_blocks(lines)) do
+    local body = {}
+    local delta, block_selected, block_total = 0, 0, 0
+    local index = block.header_last + 1
+    while index <= block.body_last do
+      if vim.startswith(lines[index], "@@") then
+        local hunk_last = block.body_last
+        for scan = index + 1, block.body_last do
+          if vim.startswith(lines[scan], "@@") then
+            hunk_last = scan - 1
+            break
+          end
+        end
+        local rows, old_count, new_count, changes, total =
+          narrow_hunk(lines, index, hunk_last, selected, reverse)
+        block_total = block_total + total
+        local old_start = parse_range(lines[index])
+        if rows and old_start then
+          block_selected = block_selected + changes
+          body[#body + 1] = ("@@ -%d,%d +%d,%d @@"):format(
+            old_start,
+            old_count,
+            old_start + delta,
+            new_count
+          )
+          vim.list_extend(body, rows)
+          delta = delta + new_count - old_count
+        end
+        index = hunk_last
+      end
+      index = index + 1
+    end
+
+    if #body > 0 then
+      -- Reversing a creation, or applying a deletion, rewrites the whole file
+      -- rather than a range inside it, so git needs every row of it. Saying so
+      -- beats letting git fail on a patch it cannot place.
+      if block_selected < block_total then
+        local header = table.concat(lines, "\n", block.header_first, block.header_last)
+        local creation = header:find("new file mode", 1, true) ~= nil
+        local deletion = header:find("deleted file mode", 1, true) ~= nil
+        if (opts.reverse and creation) or (not opts.reverse and deletion) then
+          return nil, "Whole-file additions and deletions cannot be split; act on the file instead"
+        end
+      end
+      for row = block.header_first, block.header_last do
+        patch[#patch + 1] = lines[row]
+      end
+      vim.list_extend(patch, body)
+    end
+  end
+
+  if #patch == 0 then
+    return nil, nil
+  end
+  return table.concat(patch, "\n") .. "\n", nil
 end
 
 return M
