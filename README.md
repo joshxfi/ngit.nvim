@@ -10,8 +10,7 @@ the right. It is designed for the loop that happens most often while coding:
 inspect changes, move through hunks, and stage exactly what should be committed
 without losing repository context.
 
-<!-- A short demo recording belongs here: the dashboard, hunk staging, and a
-     commit. It is the highest-value addition left to this README. -->
+<img width="1633" height="963" alt="Image" src="https://github.com/user-attachments/assets/79f11a98-8b29-40bb-bf4e-95587501c310" />
 
 ## Highlights
 
@@ -70,12 +69,12 @@ Press `?` for the full key sheet at any time.
 The section a file is selected in decides what the diff compares and what the
 actions do:
 
-| Section | Diff compares | `X` discards to |
-| --- | --- | --- |
-| Staged | `HEAD` to index | `HEAD`, index and worktree both |
-| Unstaged | index to worktree | the staged content |
-| Untracked | empty file to worktree | deletes the file |
-| Conflicts | index to worktree | refused; use `co`/`ct`, or abort |
+| Section   | Diff compares          | `X` discards to                  |
+| --------- | ---------------------- | -------------------------------- |
+| Staged    | `HEAD` to index        | `HEAD`, index and worktree both  |
+| Unstaged  | index to worktree      | the staged content               |
+| Untracked | empty file to worktree | deletes the file                 |
+| Conflicts | index to worktree      | refused; use `co`/`ct`, or abort |
 
 From the file panel, `s` and `u` act on the whole file. From a hunk in the diff
 panel, they act on that hunk alone. `a` and `A` stage or unstage everything.
@@ -92,32 +91,32 @@ diff the branch against `HEAD`, while the current branch previews its tip.
 
 All mappings are buffer-local. See `:help ngit-mappings` for the full list.
 
-| Key | Action |
-| --- | --- |
-| `q` / `r` | Close ngit / refresh |
-| `j` / `k` | Next/previous item in the focused panel |
-| `<Tab>` / `<S-Tab>` | Next/previous panel |
-| `1` `2` `3` `4` | Focus Changes/Branches/Commits/Stashes |
-| `gs` `gb` `gl` `gz` | The same four panels, by name |
-| `<CR>` / `0` | Focus the selected diff |
-| `<Esc>` / `<leader>e` | Return to the active panel |
-| `]c` / `[c` | Next/previous hunk |
-| `]f` / `[f` | Next/previous changed file in a multi-file preview |
-| `dv` | Toggle side-by-side/unified diff |
-| `s` / `u` | Stage/unstage file or current hunk |
-| `a` / `A` | Stage/unstage everything (Changes panel) |
-| `X` | Discard the selected change, after confirmation |
-| `o` / `/` | Open selected file / filter the panel |
-| `c` / `C` | Create/amend a commit in a `gitcommit` buffer |
-| `x` | Switch branch, or copy a selected commit hash |
-| `n` / `D` | Create a branch or stash / delete or drop one |
-| `a` / `p` | Apply/pop a stash (Stashes panel) |
-| `L` | Load another page of commits |
-| `f` / `U` / `P` | Fetch, fast-forward pull, or push |
-| `co` / `ct` | Resolve a conflict with ours/theirs and stage it |
-| `gC` / `gA` | Continue/abort the active Git operation |
-| `m` / `R` / `v` | Merge / rebase onto / cherry-pick the selection |
-| `?` | Show the key sheet |
+| Key                   | Action                                             |
+| --------------------- | -------------------------------------------------- |
+| `q` / `r`             | Close ngit / refresh                               |
+| `j` / `k`             | Next/previous item in the focused panel            |
+| `<Tab>` / `<S-Tab>`   | Next/previous panel                                |
+| `1` `2` `3` `4`       | Focus Changes/Branches/Commits/Stashes             |
+| `gs` `gb` `gl` `gz`   | The same four panels, by name                      |
+| `<CR>` / `0`          | Focus the selected diff                            |
+| `<Esc>` / `<leader>e` | Return to the active panel                         |
+| `]c` / `[c`           | Next/previous hunk                                 |
+| `]f` / `[f`           | Next/previous changed file in a multi-file preview |
+| `dv`                  | Toggle side-by-side/unified diff                   |
+| `s` / `u`             | Stage/unstage file or current hunk                 |
+| `a` / `A`             | Stage/unstage everything (Changes panel)           |
+| `X`                   | Discard the selected change, after confirmation    |
+| `o` / `/`             | Open selected file / filter the panel              |
+| `c` / `C`             | Create/amend a commit in a `gitcommit` buffer      |
+| `x`                   | Switch branch, or copy a selected commit hash      |
+| `n` / `D`             | Create a branch or stash / delete or drop one      |
+| `a` / `p`             | Apply/pop a stash (Stashes panel)                  |
+| `L`                   | Load another page of commits                       |
+| `f` / `U` / `P`       | Fetch, fast-forward pull, or push                  |
+| `co` / `ct`           | Resolve a conflict with ours/theirs and stage it   |
+| `gC` / `gA`           | Continue/abort the active Git operation            |
+| `m` / `R` / `v`       | Merge / rebase onto / cherry-pick the selection    |
+| `?`                   | Show the key sheet                                 |
 
 ## Configuration
 
@@ -179,15 +178,15 @@ patch costs nothing for rows that are never displayed.
 warm-up runs, and the median of seven timed samples. On an Apple M4 with 24 GB
 RAM, Neovim 0.12.4:
 
-| Workload | Fixture | Median |
-| --- | ---: | ---: |
-| Porcelain-v2 status parser | 10,000 files | 6.4 ms |
-| Commit parser | 10,000 commits | 18.0 ms |
-| Branch parser | 10,000 refs | 11.7 ms |
-| Diff presentation | 4 KiB near-identical lines | 0.37 ms |
-| Diff presentation | 4,000-line patch | 14.7 ms |
-| Preview render, unified | 4,000-line patch | 5.7 ms |
-| Preview render, side by side | 4,000-line patch | 6.7 ms |
+| Workload                     |                    Fixture |  Median |
+| ---------------------------- | -------------------------: | ------: |
+| Porcelain-v2 status parser   |               10,000 files |  6.4 ms |
+| Commit parser                |             10,000 commits | 18.0 ms |
+| Branch parser                |                10,000 refs | 11.7 ms |
+| Diff presentation            | 4 KiB near-identical lines | 0.37 ms |
+| Diff presentation            |           4,000-line patch | 14.7 ms |
+| Preview render, unified      |           4,000-line patch |  5.7 ms |
+| Preview render, side by side |           4,000-line patch |  6.7 ms |
 
 The parser rows measure in-process work, not Git startup or disk I/O. The
 render rows include drawing: buffer population, highlight extmarks, and the
