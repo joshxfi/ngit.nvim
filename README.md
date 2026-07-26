@@ -35,7 +35,7 @@ With lazy.nvim:
 
 ```lua
 {
-  "joshxfi/ngit",
+  "joshxfi/ngit.nvim",
   cmd = { "NGit", "NGitLog", "NGitBranches", "NGitStashes", "NGitClose", "NGitRefresh" },
   keys = {
     { "<leader>ng", "<cmd>NGit<cr>", desc = "Open ngit" },
@@ -47,7 +47,7 @@ With lazy.nvim:
 With `vim.pack`:
 
 ```lua
-vim.pack.add({ "https://github.com/joshxfi/ngit" })
+vim.pack.add({ "https://github.com/joshxfi/ngit.nvim" })
 
 vim.keymap.set("n", "<leader>ng", "<cmd>NGit<cr>", {
   desc = "Open ngit",
