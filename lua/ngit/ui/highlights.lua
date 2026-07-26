@@ -49,7 +49,11 @@ end
 
 local function derived_definitions()
   local fallback_background = vim.o.background == "light" and 0xf5f5f5 or 0x101014
-  local background = color("Normal", "bg", fallback_background)
+  -- Nil when the colorscheme leaves Normal unpainted, which is how a
+  -- transparent terminal shows through. Blends still need a concrete base, but
+  -- knowing it was invented matters for groups that may skip their background.
+  local normal_background = color("Normal", "bg", nil)
+  local background = normal_background or fallback_background
   local red = color("DiagnosticError", "fg", color("DiffDelete", "fg", 0xff5f67))
   local green = color("DiagnosticOk", "fg", color("DiffAdd", "fg", 0x55d66b))
   local yellow = color("DiagnosticWarn", "fg", color("DiffChange", "fg", 0xe5b95c))
@@ -59,9 +63,13 @@ local function derived_definitions()
   local cursor_line = color("CursorLine", "bg", blend(background, blue, 0.12))
   local muted = color("NonText", "fg", color("Comment", "fg", 0x7a7a8c))
   return {
-    -- A row the other side does not have. Without a tint it is indistinguishable
-    -- from a genuine blank line, which misreads an alignment gap as content.
-    NgitDiffFiller = { fg = muted, bg = blend(background, muted, 0.13) },
+    -- A row the other side does not have. On an opaque background a faint tint
+    -- keeps an alignment gap from reading as a genuine blank line. On a
+    -- transparent one it is left unpainted: an invented backdrop would punch an
+    -- opaque block through the terminal, and a gap is the one place where
+    -- showing nothing is already the honest answer.
+    NgitDiffFiller = normal_background and { fg = muted, bg = blend(background, muted, 0.13) }
+      or { fg = muted },
     -- Inactive panels keep a selection marker so the cursor position is not
     -- lost, but it recedes so only one panel reads as focused.
     NgitCursorLineIdle = { bg = blend(background, cursor_line, 0.45) },

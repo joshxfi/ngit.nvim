@@ -1691,6 +1691,37 @@ test("the diff gutter draws numbers for a window that is not the current one", f
   vim.api.nvim_buf_delete(buffer, { force = true })
 end)
 
+test("a transparent background is not painted over by alignment gaps", function()
+  local highlights = require("ngit.ui.highlights")
+  local restore = vim.api.nvim_get_hl(0, { name = "Normal", link = false })
+
+  -- Transparent: Normal carries no background, so the terminal shows through.
+  vim.api.nvim_set_hl(0, "Normal", { fg = 0xc8c8d4 })
+  highlights.setup()
+  local transparent = vim.api.nvim_get_hl(0, { name = "NgitDiffFiller", link = false })
+  equal(nil, transparent.bg)
+  truthy(transparent.fg ~= nil, "filler rows still need a foreground")
+
+  -- Added and removed rows must keep their tint either way; a diff without
+  -- them is unreadable, transparent terminal or not.
+  for _, name in ipairs({ "NgitDiffAdd", "NgitDiffDelete", "NgitDiffChange" }) do
+    truthy(
+      vim.api.nvim_get_hl(0, { name = name, link = false }).bg ~= nil,
+      name .. " must keep its background"
+    )
+  end
+
+  -- Opaque: the gap gets its faint tint back.
+  vim.api.nvim_set_hl(0, "Normal", { fg = 0xc8c8d4, bg = 0x14161b })
+  highlights.setup()
+  local opaque = vim.api.nvim_get_hl(0, { name = "NgitDiffFiller", link = false })
+  truthy(opaque.bg ~= nil, "an opaque background should tint alignment gaps")
+  truthy(opaque.bg ~= 0x14161b, "the tint should differ from Normal")
+
+  vim.api.nvim_set_hl(0, "Normal", restore)
+  highlights.setup()
+end)
+
 test("commit ages stay compact and never outgrow the column", function()
   local render = require("ngit.ui.render")
   local now = 1800000000
