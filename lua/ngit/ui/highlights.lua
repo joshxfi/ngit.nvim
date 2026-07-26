@@ -66,6 +66,7 @@ local function derived_definitions()
     -- lost, but it recedes so only one panel reads as focused.
     NgitCursorLineIdle = { bg = blend(background, cursor_line, 0.45) },
     NgitPanelMarker = { fg = blue, bold = true },
+    NgitPanelIndex = { fg = blue, bold = true },
     NgitPanelCount = { fg = blue },
     NgitPathDim = { fg = blend(background, color("Comment", "fg", 0x7a7a8c), 0.85) },
     NgitActionKey = { fg = yellow, bold = true },

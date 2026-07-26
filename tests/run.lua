@@ -1260,6 +1260,24 @@ test("session dashboard keeps all Git contexts visible with the diff on the righ
   for _, mark in ipairs(commit_extmarks) do
     commit_groups[mark[4].hl_group] = true
   end
+  -- Each panel header leads with the bracketed key that focuses it.
+  for index, id in ipairs(require("ngit.ui.dashboard").panel_order) do
+    local winbar = vim.wo[session.dashboard.panels[id].window].winbar
+    truthy(
+      winbar:find(("[%d]"):format(index), 1, true),
+      ("%s header is missing its [%d] hint: %s"):format(id, index, winbar)
+    )
+  end
+  -- Only the focused panel accents its index; the rest stay muted.
+  for _, id in ipairs(require("ngit.ui.dashboard").panel_order) do
+    local accented = vim.wo[session.dashboard.panels[id].window].winbar:find(
+      "NgitPanelIndex",
+      1,
+      true
+    ) ~= nil
+    equal(id == session.active_panel, accented, id .. " index accent is wrong")
+  end
+
   truthy(commit_groups.NgitCommitHash)
   -- The commits panel carries no date column; stashes still do.
   truthy(not commit_groups.NgitDate)

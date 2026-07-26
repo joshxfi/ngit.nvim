@@ -269,16 +269,18 @@ function Dashboard:refresh_winbars()
       local active = id == self.active_panel
       local position = panel.count > 0 and ("%d/%d"):format(panel.selected, panel.count) or "—"
       local detail = panel.detail ~= "" and ("  " .. panel.detail) or ""
-      local winbar = ("%%#%s#%s%%#%s#%d %s %%#%s#%s%%#NgitMuted#%s "):format(
-        active and "NgitPanelMarker" or "NgitPanelMarkerIdle",
-        active and "▊" or " ",
-        active and "NgitPanelActive" or "NgitMuted",
-        panel.index,
-        panel.title,
-        active and "NgitPanelCount" or "NgitMuted",
-        position,
-        escape_statusline(detail)
-      )
+      -- "[2] Branches": the bracketed index is the key that focuses the panel,
+      -- so it is coloured as a hint rather than as part of the title.
+      local winbar = table.concat({
+        ("%%#%s#%s"):format(
+          active and "NgitPanelMarker" or "NgitPanelMarkerIdle",
+          active and "▊" or " "
+        ),
+        ("%%#%s#[%d]"):format(active and "NgitPanelIndex" or "NgitMuted", panel.index),
+        ("%%#%s# %s "):format(active and "NgitPanelActive" or "NgitMuted", panel.title),
+        ("%%#%s#%s"):format(active and "NgitPanelCount" or "NgitMuted", position),
+        ("%%#NgitMuted#%s "):format(escape_statusline(detail)),
+      })
       -- Reassigning an unchanged winbar still forces a redraw of the window.
       if panel.winbar ~= winbar then
         panel.winbar = winbar

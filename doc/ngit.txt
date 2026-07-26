@@ -223,8 +223,10 @@ patch uses NgitDiffMeta, and source line numbers use NgitLineNr.
 File markers use the foreground-only NgitStagedSign, NgitUnstagedSign,
 NgitUntrackedSign, and NgitConflictSign groups; the matching section headings
 reuse them through NgitStaged, NgitUnstaged, NgitUntracked, and NgitConflict.
-Panel headers use NgitPanelActive, NgitPanelMarker, NgitPanelMarkerIdle, and
-NgitPanelCount, and the action bar uses NgitActionKey and NgitActionLabel.
+Panel headers read "[2] Branches", where the bracketed number is the key that
+focuses that panel. They use NgitPanelActive, NgitPanelIndex, NgitPanelMarker,
+NgitPanelMarkerIdle, and NgitPanelCount; the index and title stay muted until
+the panel is focused. The action bar uses NgitActionKey and NgitActionLabel.
 Unfocused panels dim their selection through NgitCursorLineIdle.
 All groups may be overridden after setup(). Theme-derived diff backgrounds are
 recomputed after :colorscheme while they remain ngit-owned; an explicit user
