@@ -204,12 +204,18 @@ mappings
 5. HIGHLIGHTING                                               *ngit-highlights*
 
 Diff lines use NgitDiffAdd, NgitDiffDelete, and NgitDiffChange. Changed text
-within a line uses NgitDiffAddText, NgitDiffDeleteText, or NgitDiffText.
+within a line uses NgitDiffAddText or NgitDiffDeleteText.
 NgitDiffAddNumber and NgitDiffDeleteNumber color the source line numbers beside
 added and removed rows; no +/- marker is drawn, as the tint carries the side.
 Headers and alignment rows use NgitDiffHeader and NgitDiffFiller. Source
 syntax highlighting is enabled when a preview contains one recognizable file
 type.
+
+An alignment row, where one side of a split has no matching line, is tinted
+only when Normal has a background. A transparent colorscheme leaves Normal
+unpainted, and inventing a backdrop for it would put an opaque block over the
+terminal. Added and removed rows keep their background either way, since that
+tint is what identifies the side.
 
 The commits panel lists the abbreviated hash and subject only. A commit's
 author and full date are the first lines of its preview, so the panel spends
@@ -228,6 +234,9 @@ focuses that panel. They use NgitPanelActive, NgitPanelIndex, NgitPanelMarker,
 NgitPanelMarkerIdle, and NgitPanelCount; the index and title stay muted until
 the panel is focused. The action bar uses NgitActionKey and NgitActionLabel.
 Unfocused panels dim their selection through NgitCursorLineIdle.
+The footer's result message uses NgitSuccess or NgitFailure, the key sheet's
+titles use NgitHeader, secondary text throughout uses NgitMuted, and the window
+statusline ngit installs over its own splits uses NgitStatusline.
 All groups may be overridden after setup(). Theme-derived diff backgrounds are
 recomputed after :colorscheme while they remain ngit-owned; an explicit user
 override is preserved.

@@ -5,7 +5,6 @@ local linked_definitions = {
   NgitHeader = { link = "Title" },
   NgitPanelActive = { link = "Title" },
   NgitPanelMarkerIdle = { link = "NonText" },
-  NgitSection = { link = "Special" },
   -- Section headings share the accent of the file markers they introduce. They
   -- are foreground-only so the heading reads as a label, not a filled bar.
   NgitStaged = { link = "NgitStagedSign" },
@@ -98,7 +97,6 @@ local function derived_definitions()
     },
     NgitDiffAddText = { bg = blend(background, green, text_amount), bold = true },
     NgitDiffDeleteText = { bg = blend(background, red, text_amount), bold = true },
-    NgitDiffText = { bg = blend(background, yellow, text_amount), bold = true },
   }
 end
 

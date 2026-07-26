@@ -31,6 +31,16 @@ local function scratch_buffer(name, filetype)
   return buffer
 end
 
+-- Assigning 'filetype' fires FileType even when the value is unchanged, and
+-- that event costs about a millisecond per buffer. The preview reassigns it on
+-- every selection change, so the guard turns roughly three milliseconds of work
+-- per keypress into none.
+local function set_filetype(buffer, filetype)
+  if valid_buffer(buffer) and vim.bo[buffer].filetype ~= filetype then
+    vim.bo[buffer].filetype = filetype
+  end
+end
+
 local function set_lines(buffer, lines)
   if not valid_buffer(buffer) then
     return
@@ -344,7 +354,7 @@ function Dashboard:render_preview(lines, title, opts)
     if vim.treesitter and vim.treesitter.stop then
       pcall(vim.treesitter.stop, target.buffer)
     end
-    vim.bo[target.buffer].filetype = "ngit-diff"
+    set_filetype(target.buffer, "ngit-diff")
   end
   if valid_window(self.preview.header.window) then
     pcall(vim.api.nvim_win_set_height, self.preview.header.window, 1)
@@ -365,7 +375,7 @@ local function render_source(self, target, model, filetype, shared_digits)
   set_lines(target.buffer, lines)
   vim.api.nvim_buf_clear_namespace(target.buffer, self.namespace, 0, -1)
   Gutter.attach(target.buffer, model, shared_digits)
-  vim.bo[target.buffer].filetype = filetype or "ngit-diff"
+  set_filetype(target.buffer, filetype or "ngit-diff")
   if vim.treesitter and vim.treesitter.stop then
     pcall(vim.treesitter.stop, target.buffer)
   end

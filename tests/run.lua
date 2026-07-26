@@ -1691,6 +1691,45 @@ test("the diff gutter draws numbers for a window that is not the current one", f
   vim.api.nvim_buf_delete(buffer, { force = true })
 end)
 
+test("reselecting does not refire FileType on the preview buffers", function()
+  local root = repository()
+  write_file(vim.fs.joinpath(root, "one.txt"), "a\n")
+  write_file(vim.fs.joinpath(root, "two.txt"), "b\n")
+
+  require("ngit").open({ cwd = root })
+  truthy(vim.wait(10000, function()
+    local session = require("ngit")._active_session()
+    return session and session.status and #session.panels.status.entries == 2
+  end, 10))
+  local session = require("ngit")._active_session()
+
+  -- Assigning 'filetype' fires FileType even when the value does not change,
+  -- and it costs about a millisecond per buffer. Moving the selection must not
+  -- pay that on every keypress.
+  local previews = {
+    [session.dashboard.preview.left.buffer] = true,
+    [session.dashboard.preview.right.buffer] = true,
+    [session.dashboard.preview.unified.buffer] = true,
+  }
+  local fired = 0
+  local group = vim.api.nvim_create_augroup("ngit_filetype_probe", { clear = true })
+  vim.api.nvim_create_autocmd("FileType", {
+    group = group,
+    callback = function(event)
+      if previews[event.buf] then
+        fired = fired + 1
+      end
+    end,
+  })
+
+  for _ = 1, 10 do
+    session:select_relative(1)
+  end
+  pcall(vim.api.nvim_del_augroup_by_id, group)
+  equal(0, fired)
+  require("ngit").close()
+end)
+
 test("a transparent background is not painted over by alignment gaps", function()
   local highlights = require("ngit.ui.highlights")
   local restore = vim.api.nvim_get_hl(0, { name = "Normal", link = false })
