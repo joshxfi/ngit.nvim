@@ -1761,6 +1761,29 @@ test("a transparent background is not painted over by alignment gaps", function(
   highlights.setup()
 end)
 
+test("branch rows mark only the checked-out branch and dim the remote prefix", function()
+  local render = require("ngit.ui.render")
+  local current = render.branch(true, "main", "chore: x", "", false)
+  local other = render.branch(false, "fix/tab", "fix: y", "", false)
+  local remote = render.branch(false, "origin/fix/tab", "fix: y", "", true)
+
+  truthy(current.text:find("* main", 1, true), current.text)
+  truthy(not other.text:find("*", 1, true), "only the current branch is marked: " .. other.text)
+  -- A remote ref used to carry a literal "r", which read as part of the name.
+  truthy(not remote.text:find("r origin", 1, true), remote.text)
+  -- Locals and remotes must start in the same column so the list scans clean.
+  equal(other.text:find("fix/tab", 1, true), remote.text:find("origin", 1, true))
+
+  local spans = {}
+  for _, span in ipairs(remote.spans) do
+    spans[span.group] = remote.text:sub(span.col + 1, span.end_col)
+  end
+  equal("origin/", spans.NgitPathDim)
+  equal("fix/tab", spans.NgitBranchRemote)
+  -- A remote name with no slash must not lose its text.
+  truthy(render.branch(false, "weird", "s", "", true).text:find("weird", 1, true))
+end)
+
 test("commit ages stay compact and never outgrow the column", function()
   local render = require("ngit.ui.render")
   local now = 1800000000

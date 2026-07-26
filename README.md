@@ -10,7 +10,7 @@ the right. It is designed for the loop that happens most often while coding:
 inspect changes, move through hunks, and stage exactly what should be committed
 without losing repository context.
 
-<img width="1633" height="963" alt="Image" src="https://github.com/user-attachments/assets/79f11a98-8b29-40bb-bf4e-95587501c310" />
+<img width="1614" height="948" alt="image" src="https://github.com/user-attachments/assets/fcdc439b-d930-4475-9481-ffbcbbfd56c6" />
 
 ## Highlights
 

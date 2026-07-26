@@ -103,12 +103,21 @@ function M.commit(oid, subject, decoration)
   return row
 end
 
-function M.branch(marker, name, subject, upstream, remote)
+--- Only the checked-out branch is marked, matching `git branch -a`. A remote
+--- ref needs no marker of its own: the "origin/" it already carries says so,
+--- and dimming that prefix leaves the branch name itself as what stands out.
+function M.branch(current, name, subject, upstream, remote)
+  local group = remote and "NgitBranchRemote" or "NgitBranchLocal"
+  local prefix, tail
+  if remote then
+    prefix, tail = name:match("^([^/]+/)(.+)$")
+  end
   return build({
     { "  " },
-    { marker, remote and "NgitBranchRemote" or "NgitBranchLocal" },
+    { current and "*" or " ", current and "NgitBranchLocal" or nil },
     { " " },
-    { name, remote and "NgitBranchRemote" or "NgitBranchLocal" },
+    { prefix or "", "NgitPathDim" },
+    { tail or name, group },
     { "  " },
     { subject },
     { upstream, "NgitUpstream" },

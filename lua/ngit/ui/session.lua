@@ -670,9 +670,8 @@ function Session:render_collection(view, preferred_key)
         table.concat({ item.oid, item.author, item.email, item.subject, item.decorations }, " ")
     elseif view == "branches" then
       entry = { kind = "branch", branch = item }
-      local marker = item.current and "*" or (item.remote and "r" or " ")
       local upstream = item.upstream ~= "" and (" → " .. item.upstream .. " " .. item.track) or ""
-      local rendered = Render.branch(marker, item.name, item.subject, upstream, item.remote)
+      local rendered = Render.branch(item.current, item.name, item.subject, upstream, item.remote)
       line = rendered.text
       entry.highlights = rendered.spans
       searchable = table.concat({ item.name, item.upstream, item.subject }, " ")
