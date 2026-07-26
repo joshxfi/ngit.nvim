@@ -97,7 +97,9 @@ function M.show(root, oid, max_bytes, callback)
     "--binary",
     "--stat",
     "--patch",
-    "--format=fuller",
+    -- "fuller" repeats the author as committer on all but rebased or amended
+    -- commits, spending two of the preview's first lines to say nothing.
+    "--format=medium",
     "--max-count=1",
     oid,
   }

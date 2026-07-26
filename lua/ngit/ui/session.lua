@@ -114,13 +114,6 @@ local function short_oid(oid)
   return oid and oid:sub(1, 8) or "????????"
 end
 
-local function calendar_date(timestamp)
-  if not timestamp or timestamp == 0 then
-    return "unknown"
-  end
-  return os.date("%Y-%m-%d", timestamp)
-end
-
 local function notify(message, level)
   vim.notify(message, level or vim.log.levels.INFO, { title = "ngit" })
 end
@@ -670,13 +663,7 @@ function Session:render_collection(view, preferred_key)
     local searchable
     if view == "commits" then
       entry = { kind = "commit", commit = item }
-      local decoration = item.decorations ~= "" and ("  " .. item.decorations) or ""
-      local rendered = Render.commit(
-        short_oid(item.oid),
-        calendar_date(item.timestamp),
-        item.subject,
-        item.decorations
-      )
+      local rendered = Render.commit(short_oid(item.oid), item.subject, item.decorations)
       line = rendered.text
       entry.highlights = rendered.spans
       searchable =
@@ -691,7 +678,7 @@ function Session:render_collection(view, preferred_key)
       searchable = table.concat({ item.name, item.upstream, item.subject }, " ")
     else
       entry = { kind = "stash", stash = item }
-      local rendered = Render.stash(item.ref, calendar_date(item.timestamp), item.subject)
+      local rendered = Render.stash(item.ref, Render.age(item.timestamp), item.subject)
       line = rendered.text
       entry.highlights = rendered.spans
       searchable = item.ref .. " " .. item.subject

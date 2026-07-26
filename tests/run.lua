@@ -1261,7 +1261,24 @@ test("session dashboard keeps all Git contexts visible with the diff on the righ
     commit_groups[mark[4].hl_group] = true
   end
   truthy(commit_groups.NgitCommitHash)
-  truthy(commit_groups.NgitDate)
+  -- The commits panel carries no date column; stashes still do.
+  truthy(not commit_groups.NgitDate)
+  local stash_groups = {}
+  for _, mark in
+    ipairs(
+      vim.api.nvim_buf_get_extmarks(
+        session.dashboard.panels.stashes.buffer,
+        session.dashboard.namespace,
+        0,
+        -1,
+        { details = true }
+      )
+    )
+  do
+    stash_groups[mark[4].hl_group] = true
+  end
+  truthy(stash_groups.NgitStashRef)
+  truthy(stash_groups.NgitDate)
   local action_lines = vim.api.nvim_buf_get_lines(session.dashboard.actions.buffer, 0, -1, false)
   truthy(table.concat(action_lines, ""):find("Apply", 1, true))
   truthy(
@@ -1641,6 +1658,52 @@ test("the diff gutter draws numbers for a window that is not the current one", f
     vim.api.nvim_win_close(window, true)
   end
   vim.api.nvim_buf_delete(buffer, { force = true })
+end)
+
+test("commit ages stay compact and never outgrow the column", function()
+  local render = require("ngit.ui.render")
+  local now = 1800000000
+  local function age(seconds)
+    return render.age(now - seconds, now)
+  end
+
+  equal("now", age(0))
+  equal("now", age(44))
+  equal("45s", age(45))
+  equal("59s", age(59))
+  equal("1m", age(60))
+  equal("59m", age(3599))
+  equal("1h", age(3600))
+  equal("23h", age(86399))
+  equal("1d", age(86400))
+  equal("6d", age(604799))
+  equal("1w", age(604800))
+  equal("4w", age(2629799))
+  equal("1mo", age(2629800))
+  equal("11mo", age(31557599))
+  equal("1y", age(31557600))
+  equal("10y", age(31557600 * 10))
+
+  equal("?", render.age(nil, now))
+  equal("?", render.age(0, now))
+  -- A commit dated in the future must not render a negative age.
+  equal("now", render.age(now + 5000, now))
+
+  for _, seconds in ipairs({ 0, 45, 3600, 86400, 604800, 2629800, 31557600 * 99 }) do
+    truthy(#age(seconds) <= 4, ("age %q exceeds the column"):format(age(seconds)))
+  end
+
+  -- Stash subjects must start at the same offset whatever the age reads.
+  local short = render.stash("stash@{0}", "1d", "on main: a subject")
+  local long = render.stash("stash@{0}", "11mo", "on main: a subject")
+  equal(
+    short.text:find("on main: a subject", 1, true),
+    long.text:find("on main: a subject", 1, true)
+  )
+
+  -- Commits carry no date column at all; their date lives in the preview.
+  local commit = render.commit("abcdef12", "feat: a subject", "")
+  equal("  abcdef12  feat: a subject", commit.text)
 end)
 
 test("the gutter reserves only as many columns as the numbers need", function()

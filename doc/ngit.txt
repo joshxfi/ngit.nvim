@@ -211,6 +211,11 @@ Headers and alignment rows use NgitDiffHeader and NgitDiffFiller. Source
 syntax highlighting is enabled when a preview contains one recognizable file
 type.
 
+The commits panel lists the abbreviated hash and subject only. A commit's
+author and full date are the first lines of its preview, so the panel spends
+its width on the subject. Stashes keep a compact age, because `git stash show`
+prints no header for one to live in.
+
 Dashboard fields use NgitCommitHash, NgitCommitType, NgitDate, NgitDecoration,
 NgitBranchLocal, NgitBranchRemote, NgitUpstream, NgitStashRef, NgitPath, and
 NgitPathDim for the leading directories of a path. Commit metadata above a
