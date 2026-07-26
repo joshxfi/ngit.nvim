@@ -358,11 +358,11 @@ end
 --- parse runs on the main loop.
 local max_treesitter_lines = 6000
 
-local function render_source(self, target, model, filetype)
+local function render_source(self, target, model, filetype, shared_digits)
   local lines = model.lines or { "" }
   set_lines(target.buffer, lines)
   vim.api.nvim_buf_clear_namespace(target.buffer, self.namespace, 0, -1)
-  Gutter.attach(target.buffer, model)
+  Gutter.attach(target.buffer, model, shared_digits)
   vim.bo[target.buffer].filetype = filetype or "ngit-diff"
   if vim.treesitter and vim.treesitter.stop then
     pcall(vim.treesitter.stop, target.buffer)
@@ -472,8 +472,10 @@ function Dashboard:render_diff(models, layout, filetype)
   end
   pcall(vim.api.nvim_win_set_height, self.actions.window, 1)
   if layout == "side_by_side" then
-    render_source(self, self.preview.left, models.split.left, filetype)
-    render_source(self, self.preview.right, models.split.right, filetype)
+    -- Both panes share a gutter width so their rows stay lined up.
+    local digits = math.max(Gutter.digits(models.split.left), Gutter.digits(models.split.right))
+    render_source(self, self.preview.left, models.split.left, filetype, digits)
+    render_source(self, self.preview.right, models.split.right, filetype, digits)
   else
     render_source(self, self.preview.unified, models.unified.unified, nil)
   end

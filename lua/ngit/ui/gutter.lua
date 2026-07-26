@@ -9,42 +9,97 @@ local M = {}
 
 -- Keyed by buffer handle, so entries are released by detach() rather than by
 -- the collector; the dashboard detaches on every re-render and on disposal.
-local models = {}
+local panes = {}
 
---- Width of "%5d" plus the marker column and its surrounding spaces.
-local width = 8
-local blank = string.rep(" ", width)
+local minimum_digits = 2
+local maximum_digits = 6
 
 M.expression = "%!v:lua.require'ngit.ui.gutter'.render()"
-M.width = width
+
+--- The column is only ever as wide as the largest number it has to show. A
+--- fixed width would indent a commit preamble and every file header by room
+--- reserved for line numbers that stretch of the patch does not have.
+---@return integer digits, 0 when the pane carries no source numbers at all
+local function digits_for(model)
+  local highest = 0
+  for _, number in pairs(model.source_numbers or {}) do
+    if number and number > highest then
+      highest = number
+    end
+  end
+  if highest == 0 then
+    return 0
+  end
+  return math.max(minimum_digits, math.min(maximum_digits, #tostring(highest)))
+end
+
+--- Digit count a pane needs on its own. Side-by-side panes are scroll-bound
+--- row for row, so the caller takes the larger of the two and passes it to
+--- both; otherwise an all-addition file, whose old side carries no numbers at
+--- all, would shift one pane against the other.
+---@param model table
+---@return integer
+function M.digits(model)
+  return digits_for(model)
+end
 
 ---@param buffer integer
 ---@param model table? pane model carrying source_numbers and source_kinds
-function M.attach(buffer, model)
-  models[buffer] = model
+---@param shared_digits integer? width to match a paired pane
+function M.attach(buffer, model, shared_digits)
+  local digits = model and math.max(digits_for(model), shared_digits or 0) or 0
+  if digits == 0 then
+    panes[buffer] = nil
+    return
+  end
+  panes[buffer] = {
+    model = model,
+    -- "%#Group#" carries no display width, so a row is digits + marker + space.
+    format = "%%#%s#%" .. digits .. "d%s ",
+    blank = string.rep(" ", digits + 2),
+  }
 end
 
 ---@param buffer integer
 function M.detach(buffer)
-  models[buffer] = nil
+  panes[buffer] = nil
+end
+
+--- Width the column occupies for a buffer, or 0 when it is not drawn.
+---@param buffer integer
+---@return integer
+function M.width(buffer)
+  local pane = panes[buffer]
+  return pane and #pane.blank or 0
 end
 
 function M.render()
-  local model = models[vim.api.nvim_get_current_buf()]
-  if not model then
-    return blank
+  -- Set by Neovim to the window being drawn. The drawn window is usually not
+  -- the current one, so resolving the buffer through it is the only reliable
+  -- way to find the right pane.
+  local window = vim.g.statusline_winid
+  local buffer
+  if window and window ~= 0 and vim.api.nvim_win_is_valid(window) then
+    buffer = vim.api.nvim_win_get_buf(window)
+  else
+    buffer = vim.api.nvim_get_current_buf()
   end
-  local number = model.source_numbers[vim.v.lnum]
+
+  local pane = panes[buffer]
+  if not pane then
+    return ""
+  end
+  local number = pane.model.source_numbers[vim.v.lnum]
   if not number then
-    return blank
+    return pane.blank
   end
-  local kind = model.source_kinds[vim.v.lnum]
+  local kind = pane.model.source_kinds[vim.v.lnum]
   if kind == "add" then
-    return ("%%#NgitDiffAddNumber#%5d + "):format(number)
+    return pane.format:format("NgitDiffAddNumber", number, "+")
   elseif kind == "delete" then
-    return ("%%#NgitDiffDeleteNumber#%5d - "):format(number)
+    return pane.format:format("NgitDiffDeleteNumber", number, "-")
   end
-  return ("%%#NgitLineNr#%5d │ "):format(number)
+  return pane.format:format("NgitLineNr", number, "│")
 end
 
 return M

@@ -1590,7 +1590,7 @@ test("commit previews carry the message and stat into the scrollable body", func
   )
 end)
 
-test("the diff gutter answers only for the row being drawn", function()
+test("the diff gutter draws numbers for a window that is not the current one", function()
   local gutter = require("ngit.ui.gutter")
   local buffer = vim.api.nvim_create_buf(false, true)
   vim.api.nvim_buf_set_lines(buffer, 0, -1, false, { "a", "b", "c" })
@@ -1599,21 +1599,67 @@ test("the diff gutter answers only for the row being drawn", function()
     source_kinds = { "add", false, "delete" },
   })
 
-  vim.api.nvim_buf_call(buffer, function()
-    vim.v.lnum = 1
-    truthy(gutter.render():find("12", 1, true))
-    truthy(gutter.render():find("NgitDiffAddNumber", 1, true))
-    vim.v.lnum = 2
-    equal(gutter.width, #gutter.render())
-    vim.v.lnum = 3
-    truthy(gutter.render():find("NgitDiffDeleteNumber", 1, true))
-  end)
+  -- Neovim evaluates 'statuscolumn' for each window while some other window
+  -- holds focus, so the pane has to be found through g:statusline_winid.
+  -- Reading the current buffer instead silently drew a blank column.
+  vim.cmd("new")
+  local window = vim.api.nvim_get_current_win()
+  vim.api.nvim_win_set_buf(window, buffer)
+  vim.cmd("wincmd p")
+  truthy(
+    vim.api.nvim_get_current_buf() ~= buffer,
+    "the drawn buffer must not be the current one for this test to mean anything"
+  )
+
+  local previous_winid = vim.g.statusline_winid
+  vim.g.statusline_winid = window
+
+  vim.v.lnum = 1
+  local added = gutter.render()
+  truthy(added:find("12", 1, true), "missing source number, got " .. vim.inspect(added))
+  truthy(added:find("NgitDiffAddNumber", 1, true), added)
+  vim.v.lnum = 3
+  truthy(gutter.render():find("NgitDiffDeleteNumber", 1, true))
+
+  -- Two-digit numbers must not reserve room for five.
+  equal(4, gutter.width(buffer))
+  vim.v.lnum = 2
+  equal(gutter.width(buffer), #gutter.render())
 
   gutter.detach(buffer)
-  vim.api.nvim_buf_call(buffer, function()
-    vim.v.lnum = 1
-    equal(gutter.width, #gutter.render())
-  end)
+  vim.v.lnum = 1
+  equal("", gutter.render())
+  equal(0, gutter.width(buffer))
+
+  vim.g.statusline_winid = previous_winid
+  if vim.api.nvim_win_is_valid(window) then
+    vim.api.nvim_win_close(window, true)
+  end
+  vim.api.nvim_buf_delete(buffer, { force = true })
+end)
+
+test("the gutter reserves only as many columns as the numbers need", function()
+  local gutter = require("ngit.ui.gutter")
+  local function width_for(highest)
+    local buffer = vim.api.nvim_create_buf(false, true)
+    gutter.attach(buffer, { source_numbers = { highest }, source_kinds = { "context" } })
+    local width = gutter.width(buffer)
+    gutter.detach(buffer)
+    vim.api.nvim_buf_delete(buffer, { force = true })
+    return width
+  end
+
+  equal(4, width_for(7))
+  equal(4, width_for(99))
+  equal(5, width_for(100))
+  equal(6, width_for(4000))
+
+  -- A pane with no numbered rows at all, such as a metadata-only preview,
+  -- must not indent every line by an empty column.
+  local buffer = vim.api.nvim_create_buf(false, true)
+  gutter.attach(buffer, { source_numbers = { false, false }, source_kinds = { false, false } })
+  equal(0, gutter.width(buffer))
+  gutter.detach(buffer)
   vim.api.nvim_buf_delete(buffer, { force = true })
 end)
 
