@@ -108,27 +108,41 @@ local function reject_unknown(name, provided, known)
   end
 end
 
+-- Checked in order so a table with several mistakes always reports the same
+-- one. vim.validate is deliberately not used: its (name, value, type) form
+-- arrived in 0.11, and the table form it replaced is deprecated, so neither
+-- spans the versions this plugin supports.
+local option_types = {
+  { "context", "number" },
+  { "debounce_ms", "number" },
+  { "refresh_debounce_ms", "number" },
+  { "max_diff_bytes", "number" },
+  { "cache_entries", "number" },
+  { "max_cache_bytes", "number" },
+  { "commit_limit", "number" },
+  { "layout", "string" },
+  { "file_panel_width", "number" },
+  { "file_panel_height", "number" },
+  { "diff_layout", "string" },
+  { "side_by_side_min_width", "number" },
+  { "hide_statusline", "boolean" },
+  { "auto_refresh", "boolean" },
+  { "confirm_discard", "boolean" },
+  { "signs", "table" },
+  { "mappings", "table" },
+}
+
 local function validate(opts)
   reject_unknown("configuration", opts, defaults)
   reject_unknown("signs", opts.signs, defaults.signs)
   reject_unknown("mapping", opts.mappings, defaults.mappings)
-  vim.validate("context", opts.context, "number")
-  vim.validate("debounce_ms", opts.debounce_ms, "number")
-  vim.validate("refresh_debounce_ms", opts.refresh_debounce_ms, "number")
-  vim.validate("max_diff_bytes", opts.max_diff_bytes, "number")
-  vim.validate("cache_entries", opts.cache_entries, "number")
-  vim.validate("max_cache_bytes", opts.max_cache_bytes, "number")
-  vim.validate("commit_limit", opts.commit_limit, "number")
-  vim.validate("layout", opts.layout, "string")
-  vim.validate("file_panel_width", opts.file_panel_width, "number")
-  vim.validate("file_panel_height", opts.file_panel_height, "number")
-  vim.validate("diff_layout", opts.diff_layout, "string")
-  vim.validate("side_by_side_min_width", opts.side_by_side_min_width, "number")
-  vim.validate("hide_statusline", opts.hide_statusline, "boolean")
-  vim.validate("auto_refresh", opts.auto_refresh, "boolean")
-  vim.validate("confirm_discard", opts.confirm_discard, "boolean")
-  vim.validate("signs", opts.signs, "table")
-  vim.validate("mappings", opts.mappings, "table")
+  for _, option in ipairs(option_types) do
+    local name, expected = option[1], option[2]
+    local actual = type(opts[name])
+    if actual ~= expected then
+      error(("ngit: %s must be a %s, got %s"):format(name, expected, actual), 3)
+    end
+  end
 
   if opts.context < 0 or opts.context % 1 ~= 0 then
     error("ngit: context must be a non-negative integer", 3)
@@ -170,7 +184,9 @@ local function validate(opts)
     error("ngit: side_by_side_min_width must be an integer of at least 40", 3)
   end
   for name, sign in pairs(opts.signs) do
-    vim.validate("signs." .. name, sign, "string")
+    if type(sign) ~= "string" then
+      error(("ngit: signs.%s must be a string, got %s"):format(name, type(sign)), 3)
+    end
   end
   for name, mapping in pairs(opts.mappings) do
     if type(mapping) ~= "string" and mapping ~= false then
