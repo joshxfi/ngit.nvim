@@ -49,7 +49,20 @@ end
 
 local function git(root, args, opts)
   opts = opts or {}
-  local command = { "git", "-c", "user.name=ngit tests", "-c", "user.email=ngit@example.test" }
+  -- init.defaultBranch is unset on a stock machine, where git falls back to
+  -- "master". A bare repository created that way points HEAD at a branch the
+  -- tests never push, so cloning it checks out nothing at all and the failure
+  -- surfaces later as an unrelated "nothing to commit". Pin it here so no test
+  -- depends on whoever's machine is running it.
+  local command = {
+    "git",
+    "-c",
+    "init.defaultBranch=main",
+    "-c",
+    "user.name=ngit tests",
+    "-c",
+    "user.email=ngit@example.test",
+  }
   vim.list_extend(command, args)
   local result = vim
     .system(command, {
