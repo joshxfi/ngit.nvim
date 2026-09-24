@@ -96,6 +96,28 @@ local function worktree_is_safe(self, paths)
   return true
 end
 
+M.worktree_is_safe = worktree_is_safe
+
+--- The same refusal for operations that can rewrite any file in the worktree,
+--- such as a hard reset: every loaded, modified buffer under the root counts.
+function M.worktree_has_no_unsaved_buffers(self)
+  local root = vim.uv.fs_realpath(self.root) or self.root
+  for _, buffer in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_is_loaded(buffer) and vim.bo[buffer].modified then
+      local name = vim.api.nvim_buf_get_name(buffer)
+      local real = name ~= "" and (vim.uv.fs_realpath(name) or name) or ""
+      if vim.startswith(real, root .. "/") then
+        notify(
+          ("Save or discard the modified buffer for %s first"):format(real:sub(#root + 2)),
+          vim.log.levels.WARN
+        )
+        return false
+      end
+    end
+  end
+  return true
+end
+
 local function confirm(self, prompt, label, perform)
   if not self.config.confirm_discard then
     perform()
