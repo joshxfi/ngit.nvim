@@ -2990,6 +2990,70 @@ test("commit switches reach git and the editor names them", function()
   editor:close()
 end)
 
+test("commit menu switches reach git through the session", function()
+  local root = repository()
+  write_file(vim.fs.joinpath(root, "base.txt"), "base\n")
+  git(root, { "add", "base.txt" })
+  git(root, { "commit", "-q", "-m", "base" })
+  -- A hook that always refuses, so only --no-verify can get a commit through.
+  local hook = vim.fs.joinpath(root, ".git", "hooks", "pre-commit")
+  write_file(hook, "#!/bin/sh\nexit 1\n")
+  vim.uv.fs_chmod(hook, 493)
+  write_file(vim.fs.joinpath(root, "hooked.txt"), "one\n")
+  git(root, { "add", "hooked.txt" })
+
+  require("ngit").open({ cwd = root })
+  truthy(vim.wait(10000, function()
+    local session = require("ngit")._active_session()
+    return session and session.status ~= nil
+  end, 10))
+  local session = require("ngit")._active_session()
+
+  local original_select = vim.ui.select
+  local function pick(prefix)
+    vim.ui.select = function(items, _, on_choice)
+      for index, item in ipairs(items) do
+        if vim.startswith(item, prefix) then
+          on_choice(item, index)
+          return
+        end
+      end
+      on_choice(nil, nil)
+    end
+  end
+  local function submit(message)
+    truthy(vim.wait(10000, function()
+      return session.commit_editor ~= nil and not session.commit_editor.closed
+    end, 10), "the commit editor did not open")
+    local editor = session.commit_editor
+    vim.api.nvim_buf_set_lines(editor.buffer, 0, -1, false, { message })
+    editor:submit()
+    -- The editor closes from the commit's own callback, which can run after git
+    -- has already written the commit; the next menu pick must not find it open.
+    truthy(vim.wait(10000, function()
+      return session.commit_editor == nil
+    end, 10), ("%q never finished committing"):format(message))
+    equal(message .. "\n", git(root, { "log", "-1", "--format=%s" }).stdout)
+  end
+
+  pick("Commit with --no-verify")
+  session:commit_menu()
+  truthy(session.commit_editor and session.commit_editor.commit_options.no_verify)
+  submit("skip the hook")
+
+  -- Nothing is staged now; --allow-empty must still open the editor, and the menu
+  -- is reachable from a panel other than Changes.
+  vim.uv.fs_unlink(hook)
+  session:switch_view("commits")
+  pick("Commit --allow-empty")
+  session:commit_menu()
+  submit("empty on purpose")
+  equal("", git(root, { "show", "--name-only", "--format=", "HEAD" }).stdout)
+
+  vim.ui.select = original_select
+  require("ngit").close()
+end)
+
 test("review mode lists a range and refuses to stage from it", function()
   local root = repository()
   write_file(vim.fs.joinpath(root, "reviewed.txt"), "base\n")

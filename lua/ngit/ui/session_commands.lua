@@ -581,7 +581,9 @@ end
 ---@param self table
 ---@param options boolean|NgitCommitOptions
 function M.prompt_commit(self, options)
-  if self.active_panel ~= "status" then
+  -- The plain commit keys belong to the Changes panel; the commit menu is global,
+  -- and a switch chosen there has to work from whichever panel it was opened in.
+  if self.active_panel ~= "status" and type(options) ~= "table" then
     return
   end
   local commit_options = type(options) == "table" and vim.deepcopy(options)
@@ -606,7 +608,7 @@ function M.prompt_commit(self, options)
     )
     return
   end
-  if staged == 0 and not amend and not self.operation then
+  if staged == 0 and not amend and not self.operation and not commit_options.allow_empty then
     notify("Nothing is staged to commit", vim.log.levels.WARN)
     return
   end
@@ -621,6 +623,7 @@ function M.prompt_commit(self, options)
       message = message,
       staged = staged,
       branch = self.status and self.status.branch or nil,
+      commit_options = commit_options,
       on_complete = function()
         self.commit_editor = nil
         if not self.closed then
