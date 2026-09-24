@@ -72,6 +72,13 @@ local function group_by_section(entries)
   return groups
 end
 
+--- Rereads every loaded buffer whose file changed on disk. Anything that can
+--- rewrite the worktree calls this, including operations that stop for conflicts,
+--- so an open buffer never shows content git has already replaced.
+function M.reload_buffers()
+  pcall(vim.cmd, "checktime")
+end
+
 function M.after_mutation(self, ok, err)
   if not ok then
     self:set_result(err or "Git operation failed", false)
@@ -79,7 +86,7 @@ function M.after_mutation(self, ok, err)
     return
   end
   -- A mutation may have rewritten files that are open elsewhere in the editor.
-  pcall(vim.cmd, "checktime")
+  M.reload_buffers()
   self:set_result("Git operation completed", true)
   self:refresh()
 end
@@ -731,6 +738,7 @@ function M.run_remote_args(self, args, label)
   end
 
   local function settle(ok, code)
+    M.reload_buffers()
     console:finish(ok, code)
     self:set_result(ok and (label .. " completed") or (label .. (" failed (%d)"):format(code)), ok)
     if self.remote_console == console then
@@ -865,6 +873,7 @@ function M.start_operation(self, operation)
       return
     end
     sequencer_backend.start(self.root, operation, target, function(ok, err)
+      M.reload_buffers()
       if ok then
         self:refresh()
         return

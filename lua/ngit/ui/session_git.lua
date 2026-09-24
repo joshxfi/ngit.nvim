@@ -73,6 +73,7 @@ function M.revert(self)
     "Revert",
     function()
       sequencer_backend.start(self.root, "revert", entry.commit.oid, function(ok, err)
+        SessionCommands.reload_buffers()
         if ok then
           self:refresh()
           return
@@ -191,6 +192,7 @@ local function open_rebase_editor(self, base, label)
       steps = steps,
       on_submit = function(plan)
         sequencer_backend.rebase_with_todo(self.root, base, plan, function(ok, rebase_err)
+          SessionCommands.reload_buffers()
           if ok then
             self:refresh()
             return
