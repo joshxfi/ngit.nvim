@@ -1000,6 +1000,18 @@ function Session:render_diff_layout(layout)
   return rendered_layout
 end
 
+--- Whether the cursor is in one of the diff windows, whatever they are showing.
+---@return boolean
+function Session:preview_focused()
+  local current = vim.api.nvim_get_current_win()
+  for _, item in ipairs(self.dashboard:preview_windows()) do
+    if item.window == current then
+      return true
+    end
+  end
+  return false
+end
+
 function Session:preview_pane()
   if not self.current_diff_models then
     return nil
@@ -1101,6 +1113,12 @@ end
 function Session:selection_patch(reverse)
   local pane, window = self:preview_pane()
   if not pane or not self.current_diff then
+    -- Pressed in the diff, a key means "this change". While the preview is still
+    -- loading there is no change to point at, and acting on the whole file
+    -- instead would turn a hunk discard into a file discard.
+    if self:preview_focused() then
+      return nil, "The diff is still loading; try again once it is shown"
+    end
     return nil, nil
   end
   if self.current_diff.truncated then
@@ -1118,7 +1136,7 @@ function Session:selection_patch(reverse)
   if first == last then
     local unified_start = pane.row_hunks[first]
     if not unified_start then
-      return nil, nil
+      return nil, "Move the cursor onto a change, or act on the file from the Changes panel"
     end
     return diff_backend.patch_at_hunk(self.current_diff.lines, unified_start), nil
   end
