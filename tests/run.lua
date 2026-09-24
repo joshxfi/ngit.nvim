@@ -1895,6 +1895,143 @@ test("discard prompts before touching an untracked file and honours cancel", fun
   require("ngit").close()
 end)
 
+test("X in the diff never falls back to discarding the whole file", function()
+  local root = repository()
+  local original = {}
+  for index = 1, 30 do
+    original[index] = ("line %02d"):format(index)
+  end
+  write_file(vim.fs.joinpath(root, "guarded.txt"), table.concat(original, "\n") .. "\n")
+  git(root, { "add", "guarded.txt" })
+  git(root, { "commit", "-q", "-m", "initial" })
+  local changed = vim.deepcopy(original)
+  changed[2] = "changed near start"
+  changed[29] = "changed near end"
+  local worktree = table.concat(changed, "\n") .. "\n"
+  write_file(vim.fs.joinpath(root, "guarded.txt"), worktree)
+
+  require("ngit").setup({ diff_layout = "unified" })
+  require("ngit").open({ cwd = root })
+  truthy(vim.wait(10000, function()
+    local session = require("ngit")._active_session()
+    return session and session.current_diff_models and session.current_diff_models.unified
+  end, 10))
+  local session = require("ngit")._active_session()
+  session.dashboard:focus_preview()
+  local pane = session.current_diff_models.unified.unified
+  local outside
+  for row = 1, vim.api.nvim_buf_line_count(0) do
+    if not pane.row_hunks[row] then
+      outside = row
+      break
+    end
+  end
+  truthy(outside, "every preview row belongs to a hunk")
+  vim.api.nvim_win_set_cursor(session.dashboard.preview.unified.window, { outside, 0 })
+
+  local prompts = {}
+  local original_select = vim.ui.select
+  vim.ui.select = function(items, opts, on_choice)
+    prompts[#prompts + 1] = opts.prompt
+    on_choice(items[#items], #items)
+  end
+  session:discard()
+  -- While the preview reloads there are no models; the diff still has focus.
+  local models = session.current_diff_models
+  session.current_diff_models = nil
+  local patch, err = session:selection_patch(true)
+  session.current_diff_models = models
+  vim.ui.select = original_select
+
+  equal({}, prompts, "a whole-file discard was offered from the diff")
+  equal(worktree, read_file(vim.fs.joinpath(root, "guarded.txt")))
+  equal(nil, patch)
+  truthy(err and err:find("loading", 1, true), err)
+  require("ngit").close()
+  require("ngit").setup()
+end)
+
+test("hard reset and restore refuse while a buffer has unsaved edits", function()
+  local root = repository()
+  write_file(vim.fs.joinpath(root, "kept.txt"), "committed\n")
+  git(root, { "add", "kept.txt" })
+  git(root, { "commit", "-q", "-m", "initial" })
+  write_file(vim.fs.joinpath(root, "kept.txt"), "on disk\n")
+  vim.cmd.edit(vim.fs.joinpath(root, "kept.txt"))
+  local buffer = vim.api.nvim_get_current_buf()
+  vim.api.nvim_buf_set_lines(buffer, 0, -1, false, { "unsaved" })
+  truthy(vim.bo[buffer].modified)
+
+  require("ngit").open({ cwd = root })
+  truthy(vim.wait(10000, function()
+    local session = require("ngit")._active_session()
+    return session
+      and session.status ~= nil
+      and #(session.panels.commits.data or {}) > 0
+  end, 10))
+  local session = require("ngit")._active_session()
+
+  local prompts = {}
+  local original_select, original_input = vim.ui.select, vim.ui.input
+  vim.ui.select = function(items, opts, on_choice)
+    prompts[#prompts + 1] = opts.prompt
+    for index, item in ipairs(items) do
+      if vim.startswith(item, "git reset --hard") or vim.startswith(item, "Restore from") then
+        on_choice(item, index)
+        return
+      end
+    end
+    on_choice(items[#items], #items)
+  end
+  vim.ui.input = function(_, on_confirm)
+    on_confirm("HEAD")
+  end
+
+  session:switch_view("commits")
+  session:reset()
+  session:switch_view("status")
+  session:file_menu()
+  vim.ui.select, vim.ui.input = original_select, original_input
+
+  -- Each menu opened, but neither reached its confirmation or git.
+  equal(2, #prompts, vim.inspect(prompts))
+  equal("on disk\n", read_file(vim.fs.joinpath(root, "kept.txt")))
+  require("ngit").close()
+  vim.api.nvim_buf_delete(buffer, { force = true })
+end)
+
+test("a revert rereads open buffers of the files it rewrote", function()
+  local root = repository()
+  write_file(vim.fs.joinpath(root, "shown.txt"), "old\n")
+  git(root, { "add", "shown.txt" })
+  git(root, { "commit", "-q", "-m", "initial" })
+  write_file(vim.fs.joinpath(root, "shown.txt"), "a longer new line\n")
+  git(root, { "commit", "-q", "-am", "change" })
+  vim.cmd.edit(vim.fs.joinpath(root, "shown.txt"))
+  local buffer = vim.api.nvim_get_current_buf()
+  equal({ "a longer new line" }, vim.api.nvim_buf_get_lines(buffer, 0, -1, false))
+
+  require("ngit").open({ cwd = root })
+  truthy(vim.wait(10000, function()
+    local session = require("ngit")._active_session()
+    return session and #(session.panels.commits.data or {}) > 0
+  end, 10))
+  local session = require("ngit")._active_session()
+  session:switch_view("commits")
+  local original_select = vim.ui.select
+  vim.ui.select = function(items, _, on_choice)
+    on_choice(items[#items], #items)
+  end
+  session:revert()
+  vim.ui.select = original_select
+
+  truthy(vim.wait(10000, function()
+    return vim.api.nvim_buf_get_lines(buffer, 0, -1, false)[1] == "old"
+  end, 10), "the open buffer still shows the reverted content")
+  require("ngit").close()
+  vim.api.nvim_buf_delete(buffer, { force = true })
+end)
+
 test("stage all and unstage all cover every pending change", function()
   local root = repository()
   write_file(vim.fs.joinpath(root, "a.txt"), "one\n")
