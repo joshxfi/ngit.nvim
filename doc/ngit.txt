@@ -247,6 +247,8 @@ the recorded stage exactly, including a file one side deleted. The per-block for
 rewrites the file, preserving whether it ended with a newline, and stages it only
 once no markers are left, so a partly resolved file is never marked resolved.
 Both diff3 and merge marker styles are understood.
+A block whose markers are ambiguous, such as one carrying a second
+"=======" line, is left untouched and reported; resolve it by hand.
 
 ==============================================================================
 7. CONFIGURATION                                                 *ngit-configure*

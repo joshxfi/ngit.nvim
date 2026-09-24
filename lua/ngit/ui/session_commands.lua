@@ -72,6 +72,13 @@ local function group_by_section(entries)
   return groups
 end
 
+--- Rereads every loaded buffer whose file changed on disk. Anything that can
+--- rewrite the worktree calls this, including operations that stop for conflicts,
+--- so an open buffer never shows content git has already replaced.
+function M.reload_buffers()
+  pcall(vim.cmd, "checktime")
+end
+
 function M.after_mutation(self, ok, err)
   if not ok then
     self:set_result(err or "Git operation failed", false)
@@ -79,7 +86,7 @@ function M.after_mutation(self, ok, err)
     return
   end
   -- A mutation may have rewritten files that are open elsewhere in the editor.
-  pcall(vim.cmd, "checktime")
+  M.reload_buffers()
   self:set_result("Git operation completed", true)
   self:refresh()
 end
@@ -91,6 +98,28 @@ local function worktree_is_safe(self, paths)
     if buffer ~= -1 and vim.api.nvim_buf_is_loaded(buffer) and vim.bo[buffer].modified then
       notify(("Save or discard the modified buffer for %s first"):format(path), vim.log.levels.WARN)
       return false
+    end
+  end
+  return true
+end
+
+M.worktree_is_safe = worktree_is_safe
+
+--- The same refusal for operations that can rewrite any file in the worktree,
+--- such as a hard reset: every loaded, modified buffer under the root counts.
+function M.worktree_has_no_unsaved_buffers(self)
+  local root = vim.uv.fs_realpath(self.root) or self.root
+  for _, buffer in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_is_loaded(buffer) and vim.bo[buffer].modified then
+      local name = vim.api.nvim_buf_get_name(buffer)
+      local real = name ~= "" and (vim.uv.fs_realpath(name) or name) or ""
+      if vim.startswith(real, root .. "/") then
+        notify(
+          ("Save or discard the modified buffer for %s first"):format(real:sub(#root + 2)),
+          vim.log.levels.WARN
+        )
+        return false
+      end
     end
   end
   return true
@@ -581,7 +610,9 @@ end
 ---@param self table
 ---@param options boolean|NgitCommitOptions
 function M.prompt_commit(self, options)
-  if self.active_panel ~= "status" then
+  -- The plain commit keys belong to the Changes panel; the commit menu is global,
+  -- and a switch chosen there has to work from whichever panel it was opened in.
+  if self.active_panel ~= "status" and type(options) ~= "table" then
     return
   end
   local commit_options = type(options) == "table" and vim.deepcopy(options)
@@ -606,7 +637,7 @@ function M.prompt_commit(self, options)
     )
     return
   end
-  if staged == 0 and not amend and not self.operation then
+  if staged == 0 and not amend and not self.operation and not commit_options.allow_empty then
     notify("Nothing is staged to commit", vim.log.levels.WARN)
     return
   end
@@ -621,6 +652,7 @@ function M.prompt_commit(self, options)
       message = message,
       staged = staged,
       branch = self.status and self.status.branch or nil,
+      commit_options = commit_options,
       on_complete = function()
         self.commit_editor = nil
         if not self.closed then
@@ -706,6 +738,7 @@ function M.run_remote_args(self, args, label)
   end
 
   local function settle(ok, code)
+    M.reload_buffers()
     console:finish(ok, code)
     self:set_result(ok and (label .. " completed") or (label .. (" failed (%d)"):format(code)), ok)
     if self.remote_console == console then
@@ -840,6 +873,7 @@ function M.start_operation(self, operation)
       return
     end
     sequencer_backend.start(self.root, operation, target, function(ok, err)
+      M.reload_buffers()
       if ok then
         self:refresh()
         return

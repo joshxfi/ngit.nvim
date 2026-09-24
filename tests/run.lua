@@ -1188,6 +1188,107 @@ test("discarding a hunk restores only that hunk in the worktree", function()
   truthy(content:find("changed near end", 1, true), "an untouched hunk was discarded too")
 end)
 
+test("unstaging a later hunk's lines leaves identical-looking lines above it alone", function()
+  -- Periodic content with a four-line insertion at the top: after the insertion,
+  -- the region four lines above the real change reads exactly like the change's
+  -- new side. A reverse patch that names the old-side position lands there.
+  local root = repository()
+  local head = {}
+  for index = 1, 10 do
+    head[#head + 1] = "u" .. index
+  end
+  for _ = 1, 6 do
+    vim.list_extend(head, { "p", "q", "r", "s" })
+  end
+  head[24] = "OLD"
+  write_file(vim.fs.joinpath(root, "periodic.txt"), table.concat(head, "\n") .. "\n")
+  git(root, { "add", "periodic.txt" })
+  git(root, { "commit", "-q", "-m", "initial" })
+
+  local staged = { "a", "b", "c", "d" }
+  vim.list_extend(staged, head)
+  staged[4 + 24] = "q"
+  write_file(vim.fs.joinpath(root, "periodic.txt"), table.concat(staged, "\n") .. "\n")
+  git(root, { "add", "periodic.txt" })
+
+  local diff_backend = require("ngit.git.diff")
+  local diff = wait_for(function(done)
+    diff_backend.load(root, "staged", "periodic.txt", 3, 100000, done)
+  end)
+  equal(2, #diff.hunks)
+  local selected = {}
+  for index, line in ipairs(diff.lines) do
+    if line == "-OLD" or (line == "+q" and index > diff.hunks[2]) then
+      selected[index] = true
+    end
+  end
+  equal(2, vim.tbl_count(selected))
+
+  local patch = assert(diff_backend.patch_for_rows(diff.lines, selected, { reverse = true }))
+  local ok, err = wait_for(function(done)
+    require("ngit.git.mutate").apply(root, patch, { reverse = true, target = "index" }, done)
+  end)
+  equal(true, ok, err)
+
+  -- Only the second hunk was unstaged: the index is HEAD plus the insertion.
+  local expected = { "a", "b", "c", "d" }
+  vim.list_extend(expected, head)
+  equal(table.concat(expected, "\n") .. "\n", git(root, { "show", ":periodic.txt" }).stdout)
+end)
+
+test("reverse-narrowed hunks are positioned by the side the target holds", function()
+  local diff = require("ngit.git.diff")
+  local lines = {
+    "diff --git a/f.txt b/f.txt",
+    "index 400d663..567274f 100644",
+    "--- a/f.txt",
+    "+++ b/f.txt",
+    "@@ -1,3 +1,7 @@",
+    "+a",
+    "+b",
+    "+c",
+    "+d",
+    " u1",
+    " u2",
+    " u3",
+    "@@ -21,7 +25,7 @@ q",
+    " r",
+    " s",
+    " p",
+    "-OLD",
+    "+q",
+    " r",
+    " s",
+    " p",
+  }
+  local function headers(patch)
+    local found = {}
+    for line in patch:gmatch("[^\n]+") do
+      if vim.startswith(line, "@@") then
+        found[#found + 1] = line
+      end
+    end
+    return found
+  end
+
+  -- The first hunk stays staged, so the second is still at its new-side line.
+  equal(
+    { "@@ -25,7 +25,7 @@" },
+    headers(assert(diff.patch_for_rows(lines, { [17] = true, [18] = true }, { reverse = true })))
+  )
+  -- Reversing both: the second hunk lands four lines earlier once the first is gone.
+  local all = { [6] = true, [7] = true, [8] = true, [9] = true, [17] = true, [18] = true }
+  equal(
+    { "@@ -1,3 +1,7 @@", "@@ -21,7 +25,7 @@" },
+    headers(assert(diff.patch_for_rows(lines, all, { reverse = true })))
+  )
+  -- Staging is unchanged: the index still lacks the insertion.
+  equal(
+    { "@@ -21,7 +21,7 @@" },
+    headers(assert(diff.patch_for_rows(lines, { [17] = true, [18] = true }, {})))
+  )
+end)
+
 test("a visual selection in the Changes panel stages every file it covers", function()
   local root = repository()
   git(root, { "commit", "-q", "--allow-empty", "-m", "initial" })
@@ -1792,6 +1893,144 @@ test("discard prompts before touching an untracked file and honours cancel", fun
   truthy(prompts[1]:find("Delete untracked file junk.txt", 1, true), prompts[1])
   truthy(vim.uv.fs_stat(junk) ~= nil, "cancelling must leave the file in place")
   require("ngit").close()
+end)
+
+test("X in the diff never falls back to discarding the whole file", function()
+  local root = repository()
+  local original = {}
+  for index = 1, 30 do
+    original[index] = ("line %02d"):format(index)
+  end
+  write_file(vim.fs.joinpath(root, "guarded.txt"), table.concat(original, "\n") .. "\n")
+  git(root, { "add", "guarded.txt" })
+  git(root, { "commit", "-q", "-m", "initial" })
+  local changed = vim.deepcopy(original)
+  changed[2] = "changed near start"
+  changed[29] = "changed near end"
+  local worktree = table.concat(changed, "\n") .. "\n"
+  write_file(vim.fs.joinpath(root, "guarded.txt"), worktree)
+
+  require("ngit").setup({ diff_layout = "unified" })
+  require("ngit").open({ cwd = root })
+  truthy(vim.wait(10000, function()
+    local session = require("ngit")._active_session()
+    return session and session.current_diff_models and session.current_diff_models.unified
+  end, 10))
+  local session = require("ngit")._active_session()
+  session.dashboard:focus_preview()
+  local pane = session.current_diff_models.unified.unified
+  local outside
+  for row = 1, vim.api.nvim_buf_line_count(0) do
+    if not pane.row_hunks[row] then
+      outside = row
+      break
+    end
+  end
+  truthy(outside, "every preview row belongs to a hunk")
+  vim.api.nvim_win_set_cursor(session.dashboard.preview.unified.window, { outside, 0 })
+
+  local prompts = {}
+  local original_select = vim.ui.select
+  vim.ui.select = function(items, opts, on_choice)
+    prompts[#prompts + 1] = opts.prompt
+    on_choice(items[#items], #items)
+  end
+  session:discard()
+  -- While the preview reloads there are no models; the diff still has focus.
+  local models = session.current_diff_models
+  session.current_diff_models = nil
+  local patch, err = session:selection_patch(true)
+  session.current_diff_models = models
+  vim.ui.select = original_select
+
+  equal({}, prompts, "a whole-file discard was offered from the diff")
+  equal(worktree, read_file(vim.fs.joinpath(root, "guarded.txt")))
+  equal(nil, patch)
+  truthy(err and err:find("loading", 1, true), err)
+  require("ngit").close()
+  require("ngit").setup()
+end)
+
+test("hard reset and restore refuse while a buffer has unsaved edits", function()
+  local root = repository()
+  write_file(vim.fs.joinpath(root, "kept.txt"), "committed\n")
+  git(root, { "add", "kept.txt" })
+  git(root, { "commit", "-q", "-m", "initial" })
+  write_file(vim.fs.joinpath(root, "kept.txt"), "on disk\n")
+  vim.cmd.edit(vim.fs.joinpath(root, "kept.txt"))
+  local buffer = vim.api.nvim_get_current_buf()
+  vim.api.nvim_buf_set_lines(buffer, 0, -1, false, { "unsaved" })
+  truthy(vim.bo[buffer].modified)
+
+  require("ngit").open({ cwd = root })
+  truthy(vim.wait(10000, function()
+    local session = require("ngit")._active_session()
+    return session and session.status ~= nil and #(session.panels.commits.data or {}) > 0
+  end, 10))
+  local session = require("ngit")._active_session()
+
+  local prompts = {}
+  local original_select, original_input = vim.ui.select, vim.ui.input
+  vim.ui.select = function(items, opts, on_choice)
+    prompts[#prompts + 1] = opts.prompt
+    for index, item in ipairs(items) do
+      if vim.startswith(item, "git reset --hard") or vim.startswith(item, "Restore from") then
+        on_choice(item, index)
+        return
+      end
+    end
+    on_choice(items[#items], #items)
+  end
+  vim.ui.input = function(_, on_confirm)
+    on_confirm("HEAD")
+  end
+
+  session:switch_view("commits")
+  session:reset()
+  session:switch_view("status")
+  session:file_menu()
+  vim.ui.select, vim.ui.input = original_select, original_input
+
+  -- Each menu opened, but neither reached its confirmation or git.
+  equal(2, #prompts, vim.inspect(prompts))
+  equal("on disk\n", read_file(vim.fs.joinpath(root, "kept.txt")))
+  require("ngit").close()
+  vim.api.nvim_buf_delete(buffer, { force = true })
+end)
+
+test("a revert rereads open buffers of the files it rewrote", function()
+  local root = repository()
+  write_file(vim.fs.joinpath(root, "shown.txt"), "old\n")
+  git(root, { "add", "shown.txt" })
+  git(root, { "commit", "-q", "-m", "initial" })
+  write_file(vim.fs.joinpath(root, "shown.txt"), "a longer new line\n")
+  git(root, { "commit", "-q", "-am", "change" })
+  vim.cmd.edit(vim.fs.joinpath(root, "shown.txt"))
+  local buffer = vim.api.nvim_get_current_buf()
+  equal({ "a longer new line" }, vim.api.nvim_buf_get_lines(buffer, 0, -1, false))
+
+  require("ngit").open({ cwd = root })
+  truthy(vim.wait(10000, function()
+    local session = require("ngit")._active_session()
+    return session and #(session.panels.commits.data or {}) > 0
+  end, 10))
+  local session = require("ngit")._active_session()
+  session:switch_view("commits")
+  local original_select = vim.ui.select
+  vim.ui.select = function(items, _, on_choice)
+    on_choice(items[#items], #items)
+  end
+  session:revert()
+  vim.ui.select = original_select
+
+  truthy(
+    vim.wait(10000, function()
+      return vim.api.nvim_buf_get_lines(buffer, 0, -1, false)[1] == "old"
+    end, 10),
+    "the open buffer still shows the reverted content"
+  )
+  require("ngit").close()
+  vim.api.nvim_buf_delete(buffer, { force = true })
 end)
 
 test("stage all and unstage all cover every pending change", function()
@@ -2517,6 +2756,95 @@ test("a real conflict can be resolved one block at a time and then staged", func
   equal("", git(root, { "diff", "--name-only", "--diff-filter=U" }).stdout)
 end)
 
+test("conflict markers must be exactly seven characters", function()
+  local conflict = require("ngit.git.conflict")
+  -- A heading underline in the incoming side is text, not a separator.
+  local underline = {
+    "<<<<<<< HEAD",
+    "Ours title",
+    "=======",
+    "Theirs title",
+    "==========",
+    ">>>>>>> topic",
+  }
+  local blocks, ambiguous = conflict.parse_markers(underline)
+  equal(1, #blocks)
+  equal(0, #ambiguous)
+  equal(3, blocks[1].middle)
+  equal({ "Ours title" }, conflict.resolve_lines(underline, blocks, "ours"))
+  equal({ "Theirs title", "==========" }, conflict.resolve_lines(underline, blocks, "theirs"))
+
+  -- Longer markers are what git nests inside a recursive merge base.
+  local nested = { "<<<<<<<<< inner", "x", "=========", "y", ">>>>>>>>> inner" }
+  equal(0, #conflict.parse_markers(nested))
+
+  -- Windows line endings keep the marker and drop the carriage return from the label.
+  local crlf = conflict.parse_markers({
+    "<<<<<<< HEAD\r",
+    "a\r",
+    "=======\r",
+    "b\r",
+    ">>>>>>> topic\r",
+  })
+  equal(1, #crlf)
+  equal("HEAD", crlf[1].ours_label)
+  equal("topic", crlf[1].theirs_label)
+end)
+
+test("a conflict block with two separators is ambiguous and never rewritten", function()
+  local conflict = require("ngit.git.conflict")
+  local lines = {
+    "<<<<<<< HEAD",
+    "ours",
+    "=======",
+    "theirs",
+    "=======",
+    "more theirs",
+    ">>>>>>> topic",
+    "<<<<<<< HEAD",
+    "ours two",
+    "||||||| base",
+    "base two",
+    "=======",
+    "theirs two",
+    "||||||| stray",
+    ">>>>>>> topic",
+  }
+  local blocks, ambiguous = conflict.parse_markers(lines)
+  equal(0, #blocks)
+  equal({ { start = 1, finish = 7 }, { start = 8, finish = 15 } }, ambiguous)
+  truthy(conflict.has_markers(lines))
+  truthy(not conflict.has_markers({ "plain", "==========", "text" }))
+end)
+
+test("an ambiguous conflict is refused and the file stays unmerged", function()
+  local root = repository()
+  write_file(vim.fs.joinpath(root, "notes.txt"), "title\n")
+  git(root, { "add", "notes.txt" })
+  git(root, { "commit", "-q", "-m", "base" })
+  git(root, { "switch", "-q", "-c", "topic" })
+  write_file(vim.fs.joinpath(root, "notes.txt"), "theirs\n=======\nmore\n")
+  git(root, { "commit", "-q", "-am", "topic" })
+  git(root, { "switch", "-q", "main" })
+  write_file(vim.fs.joinpath(root, "notes.txt"), "ours\n")
+  git(root, { "commit", "-q", "-am", "main" })
+  git(root, { "merge", "-q", "topic" }, { accept = { [1] = true } })
+
+  local conflict = require("ngit.git.conflict")
+  local before = read_file(vim.fs.joinpath(root, "notes.txt"))
+  local ok, err = wait_for(function(done)
+    conflict.resolve(root, "notes.txt", "theirs", 2, done)
+  end)
+  equal(false, ok)
+  truthy(err and err:find("more than one separator", 1, true), err)
+  ok, err = wait_for(function(done)
+    conflict.choose(root, "notes.txt", "both", done)
+  end)
+  equal(false, ok)
+  equal(before, read_file(vim.fs.joinpath(root, "notes.txt")))
+  equal("notes.txt\n", git(root, { "diff", "--name-only", "--diff-filter=U" }).stdout)
+end)
+
 test("a revision range lists its files and diffs each of them", function()
   local root = repository()
   write_file(vim.fs.joinpath(root, "kept.txt"), "base\n")
@@ -2798,6 +3126,76 @@ test("commit switches reach git and the editor names them", function()
   truthy(title:find("--signoff", 1, true), "the title hid a switch that changes the commit")
   truthy(title:find("--no-verify", 1, true))
   editor:close()
+end)
+
+test("commit menu switches reach git through the session", function()
+  local root = repository()
+  write_file(vim.fs.joinpath(root, "base.txt"), "base\n")
+  git(root, { "add", "base.txt" })
+  git(root, { "commit", "-q", "-m", "base" })
+  -- A hook that always refuses, so only --no-verify can get a commit through.
+  local hook = vim.fs.joinpath(root, ".git", "hooks", "pre-commit")
+  write_file(hook, "#!/bin/sh\nexit 1\n")
+  vim.uv.fs_chmod(hook, 493)
+  write_file(vim.fs.joinpath(root, "hooked.txt"), "one\n")
+  git(root, { "add", "hooked.txt" })
+
+  require("ngit").open({ cwd = root })
+  truthy(vim.wait(10000, function()
+    local session = require("ngit")._active_session()
+    return session and session.status ~= nil
+  end, 10))
+  local session = require("ngit")._active_session()
+
+  local original_select = vim.ui.select
+  local function pick(prefix)
+    vim.ui.select = function(items, _, on_choice)
+      for index, item in ipairs(items) do
+        if vim.startswith(item, prefix) then
+          on_choice(item, index)
+          return
+        end
+      end
+      on_choice(nil, nil)
+    end
+  end
+  local function submit(message)
+    truthy(
+      vim.wait(10000, function()
+        return session.commit_editor ~= nil and not session.commit_editor.closed
+      end, 10),
+      "the commit editor did not open"
+    )
+    local editor = session.commit_editor
+    vim.api.nvim_buf_set_lines(editor.buffer, 0, -1, false, { message })
+    editor:submit()
+    -- The editor closes from the commit's own callback, which can run after git
+    -- has already written the commit; the next menu pick must not find it open.
+    truthy(
+      vim.wait(10000, function()
+        return session.commit_editor == nil
+      end, 10),
+      ("%q never finished committing"):format(message)
+    )
+    equal(message .. "\n", git(root, { "log", "-1", "--format=%s" }).stdout)
+  end
+
+  pick("Commit with --no-verify")
+  session:commit_menu()
+  truthy(session.commit_editor and session.commit_editor.commit_options.no_verify)
+  submit("skip the hook")
+
+  -- Nothing is staged now; --allow-empty must still open the editor, and the menu
+  -- is reachable from a panel other than Changes.
+  vim.uv.fs_unlink(hook)
+  session:switch_view("commits")
+  pick("Commit --allow-empty")
+  session:commit_menu()
+  submit("empty on purpose")
+  equal("", git(root, { "show", "--name-only", "--format=", "HEAD" }).stdout)
+
+  vim.ui.select = original_select
+  require("ngit").close()
 end)
 
 test("review mode lists a range and refuses to stage from it", function()

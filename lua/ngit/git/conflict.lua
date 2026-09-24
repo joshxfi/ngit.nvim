@@ -16,32 +16,87 @@ local theirs_marker = ">>>>>>>"
 ---@field ours_label string
 ---@field theirs_label string
 
+--- Label after a marker, or nil when the line is not that marker.
+---
+--- Git writes every marker as exactly seven characters followed by a space and
+--- a label, or by the end of the line. Anything longer is text that happens to
+--- start the same way: a Markdown or reStructuredText underline, or the longer
+--- markers git itself nests inside a recursive merge base.
+---@param line string
+---@param marker string
+---@return string?
+local function marker_label(line, marker)
+  if line:sub(1, #marker) ~= marker then
+    return nil
+  end
+  local rest = line:sub(#marker + 1):gsub("\r$", "")
+  if rest == "" then
+    return ""
+  end
+  if rest:match("^%s") then
+    return vim.trim(rest)
+  end
+  return nil
+end
+
 --- Conflict blocks in a worktree file, in order.
 ---
 --- A block only counts once it is complete: a file can legitimately contain a
 --- line of angle brackets, and half a marker set is not something to rewrite.
+--- A block that carries a second separator or base marker cannot be split
+--- without guessing which one git wrote, so it is returned separately as
+--- ambiguous and never rewritten.
 ---@param lines string[]
----@return NgitConflictBlock[]
+---@return NgitConflictBlock[] blocks, { start: integer, finish: integer }[] ambiguous
 function M.parse_markers(lines)
-  local blocks = {}
+  local blocks, ambiguous = {}, {}
   local current
   for index, line in ipairs(lines) do
-    if vim.startswith(line, ours_marker) then
-      current = { start = index, ours_label = vim.trim(line:sub(#ours_marker + 1)) }
-    elseif current and vim.startswith(line, base_marker) then
-      current.base = index
-    elseif current and vim.startswith(line, split_marker) then
-      current.middle = index
-    elseif current and vim.startswith(line, theirs_marker) then
+    local ours = marker_label(line, ours_marker)
+    if ours then
+      if current then
+        ambiguous[#ambiguous + 1] = { start = current.start, finish = index - 1 }
+      end
+      current = { start = index, ours_label = ours }
+    elseif current and marker_label(line, base_marker) then
+      if current.base or current.middle then
+        current.ambiguous = true
+      else
+        current.base = index
+      end
+    elseif current and marker_label(line, split_marker) then
       if current.middle then
+        current.ambiguous = true
+      else
+        current.middle = index
+      end
+    elseif current and marker_label(line, theirs_marker) then
+      if current.middle and not current.ambiguous then
         current.finish = index
-        current.theirs_label = vim.trim(line:sub(#theirs_marker + 1))
+        current.theirs_label = marker_label(line, theirs_marker)
+        current.ambiguous = nil
         blocks[#blocks + 1] = current
+      else
+        ambiguous[#ambiguous + 1] = { start = current.start, finish = index }
       end
       current = nil
     end
   end
-  return blocks
+  return blocks, ambiguous
+end
+
+--- Whether any line still opens or closes a conflict, complete or not. Staging
+--- is refused while one does, so a block ngit could not parse is never marked
+--- resolved by accident.
+---@param lines string[]
+---@return boolean
+function M.has_markers(lines)
+  for _, line in ipairs(lines) do
+    if marker_label(line, ours_marker) or marker_label(line, theirs_marker) then
+      return true
+    end
+  end
+  return false
 end
 
 --- Body of one side of a block, with the markers and the unwanted side removed.
@@ -151,7 +206,13 @@ function M.resolve(root, path, side, line, callback)
     callback(false, ("Unable to read %s"):format(path))
     return
   end
-  local blocks = M.parse_markers(lines)
+  local blocks, ambiguous = M.parse_markers(lines)
+  for _, range in ipairs(ambiguous) do
+    if #blocks == 0 or (line and line >= range.start and line <= range.finish) then
+      callback(false, "This conflict block has more than one separator; resolve it by hand")
+      return
+    end
+  end
   if #blocks == 0 then
     callback(false, ("%s carries no conflict markers"):format(path))
     return
@@ -177,10 +238,9 @@ function M.resolve(root, path, side, line, callback)
     return
   end
 
-  local remaining = select(1, M.parse_markers(select(1, read_lines(absolute)) or {}))
-  if #remaining > 0 then
+  if M.has_markers(select(1, read_lines(absolute)) or {}) then
     -- Still conflicted, so staging now would mark it resolved while markers are
-    -- left in the file.
+    -- left in the file. That includes a block too ambiguous to rewrite.
     callback(true, nil)
     return
   end

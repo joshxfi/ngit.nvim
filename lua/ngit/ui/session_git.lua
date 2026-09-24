@@ -10,6 +10,7 @@ local stash_backend = require("ngit.git.stash")
 local submodule_backend = require("ngit.git.submodule")
 local worktree_backend = require("ngit.git.worktree")
 local Menu = require("ngit.ui.menu")
+local SessionCommands = require("ngit.ui.session_commands")
 
 local M = {}
 
@@ -72,6 +73,7 @@ function M.revert(self)
     "Revert",
     function()
       sequencer_backend.start(self.root, "revert", entry.commit.oid, function(ok, err)
+        SessionCommands.reload_buffers()
         if ok then
           self:refresh()
           return
@@ -126,6 +128,9 @@ function M.reset(self)
           mutate.reset(self.root, mode.mode, revision, settler(self))
         end
         if mode.destructive then
+          if not SessionCommands.worktree_has_no_unsaved_buffers(self) then
+            return
+          end
           Menu.confirm(
             ("Hard reset to %s? Every uncommitted change is lost."):format(label),
             "Discard and reset",
@@ -187,6 +192,7 @@ local function open_rebase_editor(self, base, label)
       steps = steps,
       on_submit = function(plan)
         sequencer_backend.rebase_with_todo(self.root, base, plan, function(ok, rebase_err)
+          SessionCommands.reload_buffers()
           if ok then
             self:refresh()
             return
@@ -635,6 +641,9 @@ function M.file_menu(self)
     label = "Restore from a commit…",
     detail = "overwrite the index and the worktree copy",
     action = function()
+      if not SessionCommands.worktree_is_safe(self, { path }) then
+        return
+      end
       Menu.ask(("Restore %s from: "):format(path), "HEAD", function(revision)
         Menu.confirm(
           ("Overwrite %s with its %s content?"):format(path, revision),
