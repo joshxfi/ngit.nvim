@@ -1188,6 +1188,107 @@ test("discarding a hunk restores only that hunk in the worktree", function()
   truthy(content:find("changed near end", 1, true), "an untouched hunk was discarded too")
 end)
 
+test("unstaging a later hunk's lines leaves identical-looking lines above it alone", function()
+  -- Periodic content with a four-line insertion at the top: after the insertion,
+  -- the region four lines above the real change reads exactly like the change's
+  -- new side. A reverse patch that names the old-side position lands there.
+  local root = repository()
+  local head = {}
+  for index = 1, 10 do
+    head[#head + 1] = "u" .. index
+  end
+  for _ = 1, 6 do
+    vim.list_extend(head, { "p", "q", "r", "s" })
+  end
+  head[24] = "OLD"
+  write_file(vim.fs.joinpath(root, "periodic.txt"), table.concat(head, "\n") .. "\n")
+  git(root, { "add", "periodic.txt" })
+  git(root, { "commit", "-q", "-m", "initial" })
+
+  local staged = { "a", "b", "c", "d" }
+  vim.list_extend(staged, head)
+  staged[4 + 24] = "q"
+  write_file(vim.fs.joinpath(root, "periodic.txt"), table.concat(staged, "\n") .. "\n")
+  git(root, { "add", "periodic.txt" })
+
+  local diff_backend = require("ngit.git.diff")
+  local diff = wait_for(function(done)
+    diff_backend.load(root, "staged", "periodic.txt", 3, 100000, done)
+  end)
+  equal(2, #diff.hunks)
+  local selected = {}
+  for index, line in ipairs(diff.lines) do
+    if line == "-OLD" or (line == "+q" and index > diff.hunks[2]) then
+      selected[index] = true
+    end
+  end
+  equal(2, vim.tbl_count(selected))
+
+  local patch = assert(diff_backend.patch_for_rows(diff.lines, selected, { reverse = true }))
+  local ok, err = wait_for(function(done)
+    require("ngit.git.mutate").apply(root, patch, { reverse = true, target = "index" }, done)
+  end)
+  equal(true, ok, err)
+
+  -- Only the second hunk was unstaged: the index is HEAD plus the insertion.
+  local expected = { "a", "b", "c", "d" }
+  vim.list_extend(expected, head)
+  equal(table.concat(expected, "\n") .. "\n", git(root, { "show", ":periodic.txt" }).stdout)
+end)
+
+test("reverse-narrowed hunks are positioned by the side the target holds", function()
+  local diff = require("ngit.git.diff")
+  local lines = {
+    "diff --git a/f.txt b/f.txt",
+    "index 400d663..567274f 100644",
+    "--- a/f.txt",
+    "+++ b/f.txt",
+    "@@ -1,3 +1,7 @@",
+    "+a",
+    "+b",
+    "+c",
+    "+d",
+    " u1",
+    " u2",
+    " u3",
+    "@@ -21,7 +25,7 @@ q",
+    " r",
+    " s",
+    " p",
+    "-OLD",
+    "+q",
+    " r",
+    " s",
+    " p",
+  }
+  local function headers(patch)
+    local found = {}
+    for line in patch:gmatch("[^\n]+") do
+      if vim.startswith(line, "@@") then
+        found[#found + 1] = line
+      end
+    end
+    return found
+  end
+
+  -- The first hunk stays staged, so the second is still at its new-side line.
+  equal(
+    { "@@ -25,7 +25,7 @@" },
+    headers(assert(diff.patch_for_rows(lines, { [17] = true, [18] = true }, { reverse = true })))
+  )
+  -- Reversing both: the second hunk lands four lines earlier once the first is gone.
+  local all = { [6] = true, [7] = true, [8] = true, [9] = true, [17] = true, [18] = true }
+  equal(
+    { "@@ -1,3 +1,7 @@", "@@ -21,7 +25,7 @@" },
+    headers(assert(diff.patch_for_rows(lines, all, { reverse = true })))
+  )
+  -- Staging is unchanged: the index still lacks the insertion.
+  equal(
+    { "@@ -21,7 +21,7 @@" },
+    headers(assert(diff.patch_for_rows(lines, { [17] = true, [18] = true }, {})))
+  )
+end)
+
 test("a visual selection in the Changes panel stages every file it covers", function()
   local root = repository()
   git(root, { "commit", "-q", "--allow-empty", "-m", "initial" })

@@ -626,13 +626,23 @@ function M.patch_for_rows(lines, selected, opts)
         local rows, old_count, new_count, changes, total =
           narrow_hunk(lines, index, hunk_last, selected, reverse)
         block_total = block_total + total
-        local old_start = parse_range(lines[index])
+        local old_start, _, new_start = parse_range(lines[index])
         if rows and old_start then
           block_selected = block_selected + changes
+          -- `--recount` fixes the counts but trusts the starts, and git places a
+          -- hunk by the side the target holds. Applying forward that is the old
+          -- side, at its recorded position because hunks left out are not
+          -- applied; reversing it is the new side, which the target holds in
+          -- full, so its recorded position is where the content really is. The
+          -- other side shifts by whatever the hunks emitted before it changed.
+          local minus_start, plus_start = old_start, old_start + delta
+          if reverse then
+            minus_start, plus_start = new_start - delta, new_start
+          end
           body[#body + 1] = ("@@ -%d,%d +%d,%d @@"):format(
-            old_start,
+            minus_start,
             old_count,
-            old_start + delta,
+            plus_start,
             new_count
           )
           vim.list_extend(body, rows)
