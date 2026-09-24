@@ -2618,6 +2618,95 @@ test("a real conflict can be resolved one block at a time and then staged", func
   equal("", git(root, { "diff", "--name-only", "--diff-filter=U" }).stdout)
 end)
 
+test("conflict markers must be exactly seven characters", function()
+  local conflict = require("ngit.git.conflict")
+  -- A heading underline in the incoming side is text, not a separator.
+  local underline = {
+    "<<<<<<< HEAD",
+    "Ours title",
+    "=======",
+    "Theirs title",
+    "==========",
+    ">>>>>>> topic",
+  }
+  local blocks, ambiguous = conflict.parse_markers(underline)
+  equal(1, #blocks)
+  equal(0, #ambiguous)
+  equal(3, blocks[1].middle)
+  equal({ "Ours title" }, conflict.resolve_lines(underline, blocks, "ours"))
+  equal({ "Theirs title", "==========" }, conflict.resolve_lines(underline, blocks, "theirs"))
+
+  -- Longer markers are what git nests inside a recursive merge base.
+  local nested = { "<<<<<<<<< inner", "x", "=========", "y", ">>>>>>>>> inner" }
+  equal(0, #conflict.parse_markers(nested))
+
+  -- Windows line endings keep the marker and drop the carriage return from the label.
+  local crlf = conflict.parse_markers({
+    "<<<<<<< HEAD\r",
+    "a\r",
+    "=======\r",
+    "b\r",
+    ">>>>>>> topic\r",
+  })
+  equal(1, #crlf)
+  equal("HEAD", crlf[1].ours_label)
+  equal("topic", crlf[1].theirs_label)
+end)
+
+test("a conflict block with two separators is ambiguous and never rewritten", function()
+  local conflict = require("ngit.git.conflict")
+  local lines = {
+    "<<<<<<< HEAD",
+    "ours",
+    "=======",
+    "theirs",
+    "=======",
+    "more theirs",
+    ">>>>>>> topic",
+    "<<<<<<< HEAD",
+    "ours two",
+    "||||||| base",
+    "base two",
+    "=======",
+    "theirs two",
+    "||||||| stray",
+    ">>>>>>> topic",
+  }
+  local blocks, ambiguous = conflict.parse_markers(lines)
+  equal(0, #blocks)
+  equal({ { start = 1, finish = 7 }, { start = 8, finish = 15 } }, ambiguous)
+  truthy(conflict.has_markers(lines))
+  truthy(not conflict.has_markers({ "plain", "==========", "text" }))
+end)
+
+test("an ambiguous conflict is refused and the file stays unmerged", function()
+  local root = repository()
+  write_file(vim.fs.joinpath(root, "notes.txt"), "title\n")
+  git(root, { "add", "notes.txt" })
+  git(root, { "commit", "-q", "-m", "base" })
+  git(root, { "switch", "-q", "-c", "topic" })
+  write_file(vim.fs.joinpath(root, "notes.txt"), "theirs\n=======\nmore\n")
+  git(root, { "commit", "-q", "-am", "topic" })
+  git(root, { "switch", "-q", "main" })
+  write_file(vim.fs.joinpath(root, "notes.txt"), "ours\n")
+  git(root, { "commit", "-q", "-am", "main" })
+  git(root, { "merge", "-q", "topic" }, { accept = { [1] = true } })
+
+  local conflict = require("ngit.git.conflict")
+  local before = read_file(vim.fs.joinpath(root, "notes.txt"))
+  local ok, err = wait_for(function(done)
+    conflict.resolve(root, "notes.txt", "theirs", 2, done)
+  end)
+  equal(false, ok)
+  truthy(err and err:find("more than one separator", 1, true), err)
+  ok, err = wait_for(function(done)
+    conflict.choose(root, "notes.txt", "both", done)
+  end)
+  equal(false, ok)
+  equal(before, read_file(vim.fs.joinpath(root, "notes.txt")))
+  equal("notes.txt\n", git(root, { "diff", "--name-only", "--diff-filter=U" }).stdout)
+end)
+
 test("a revision range lists its files and diffs each of them", function()
   local root = repository()
   write_file(vim.fs.joinpath(root, "kept.txt"), "base\n")
