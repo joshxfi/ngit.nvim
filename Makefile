@@ -7,13 +7,13 @@
 GIT_HERMETIC = GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
 
 test:
-	$(GIT_HERMETIC) NVIM_LOG_FILE=/tmp/ngit-nvim.log nvim --headless --clean -u tests/minimal_init.lua -c "lua dofile('tests/run.lua')"
+	$(GIT_HERMETIC) NVIM_LOG_FILE=/tmp/ngit-nvim.log nvim --headless --clean -u tests/minimal_init.lua -c "lua local ok, err = pcall(dofile, 'tests/run.lua') if not ok then io.stderr:write(tostring(err) .. '\n') vim.cmd('cquit 1') end"
 
 smoke:
-	NVIM_LOG_FILE=/tmp/ngit-nvim.log nvim --headless --clean -u tests/minimal_init.lua -c "lua assert(require('ngit'))" -c "qa!"
+	NVIM_LOG_FILE=/tmp/ngit-nvim.log nvim --headless --clean -u tests/minimal_init.lua -c "lua local ok, err = pcall(require, 'ngit') if not ok then io.stderr:write(tostring(err) .. '\n') vim.cmd('cquit 1') end" -c "qa!"
 
 docs:
-	NVIM_LOG_FILE=/tmp/ngit-nvim.log nvim --headless --clean -u tests/minimal_init.lua -c "silent help ngit" -c "qa!"
+	NVIM_LOG_FILE=/tmp/ngit-nvim.log nvim --headless --clean -u tests/minimal_init.lua -c "try | helptags doc | silent help ngit | catch | echo v:exception | cquit 1 | endtry" -c "qa!"
 
 diff-check:
 	git diff --check
