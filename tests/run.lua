@@ -1965,9 +1965,7 @@ test("hard reset and restore refuse while a buffer has unsaved edits", function(
   require("ngit").open({ cwd = root })
   truthy(vim.wait(10000, function()
     local session = require("ngit")._active_session()
-    return session
-      and session.status ~= nil
-      and #(session.panels.commits.data or {}) > 0
+    return session and session.status ~= nil and #(session.panels.commits.data or {}) > 0
   end, 10))
   local session = require("ngit")._active_session()
 
@@ -2025,9 +2023,12 @@ test("a revert rereads open buffers of the files it rewrote", function()
   session:revert()
   vim.ui.select = original_select
 
-  truthy(vim.wait(10000, function()
-    return vim.api.nvim_buf_get_lines(buffer, 0, -1, false)[1] == "old"
-  end, 10), "the open buffer still shows the reverted content")
+  truthy(
+    vim.wait(10000, function()
+      return vim.api.nvim_buf_get_lines(buffer, 0, -1, false)[1] == "old"
+    end, 10),
+    "the open buffer still shows the reverted content"
+  )
   require("ngit").close()
   vim.api.nvim_buf_delete(buffer, { force = true })
 end)
@@ -3159,17 +3160,23 @@ test("commit menu switches reach git through the session", function()
     end
   end
   local function submit(message)
-    truthy(vim.wait(10000, function()
-      return session.commit_editor ~= nil and not session.commit_editor.closed
-    end, 10), "the commit editor did not open")
+    truthy(
+      vim.wait(10000, function()
+        return session.commit_editor ~= nil and not session.commit_editor.closed
+      end, 10),
+      "the commit editor did not open"
+    )
     local editor = session.commit_editor
     vim.api.nvim_buf_set_lines(editor.buffer, 0, -1, false, { message })
     editor:submit()
     -- The editor closes from the commit's own callback, which can run after git
     -- has already written the commit; the next menu pick must not find it open.
-    truthy(vim.wait(10000, function()
-      return session.commit_editor == nil
-    end, 10), ("%q never finished committing"):format(message))
+    truthy(
+      vim.wait(10000, function()
+        return session.commit_editor == nil
+      end, 10),
+      ("%q never finished committing"):format(message)
+    )
     equal(message .. "\n", git(root, { "log", "-1", "--format=%s" }).stdout)
   end
 
