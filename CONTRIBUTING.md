@@ -24,6 +24,10 @@ an integration test for every Git mutation, including its failure or conflict
 state where applicable. The benchmark uses generated fixtures, warm-up runs,
 and median timings; it excludes Git process startup, disk I/O, and rendering.
 
+Every `make check` gate exits non-zero on failure, including an error raised
+while loading `tests/run.lua`, a failing `require("ngit")`, and a missing or
+duplicate help tag.
+
 ## Architecture
 
 - `lua/ngit/git/` contains Git commands and parsers. It must not manipulate
