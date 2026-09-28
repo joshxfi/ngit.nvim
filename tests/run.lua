@@ -2096,6 +2096,173 @@ test("hard reset and restore refuse while a buffer has unsaved edits", function(
   vim.api.nvim_buf_delete(buffer, { force = true })
 end)
 
+-- A repository whose `topic` branch changes shared.txt, with shared.txt open on
+-- main and edited but not saved.
+local function unsaved_over_incoming_change()
+  local root = repository()
+  local path = vim.fs.joinpath(root, "shared.txt")
+  write_file(path, "base\n")
+  git(root, { "add", "shared.txt" })
+  git(root, { "commit", "-q", "-m", "initial" })
+  git(root, { "switch", "-q", "-c", "topic" })
+  write_file(path, "incoming\n")
+  git(root, { "commit", "-q", "-am", "incoming change" })
+  git(root, { "switch", "-q", "main" })
+  vim.cmd.edit(path)
+  local buffer = vim.api.nvim_get_current_buf()
+  vim.api.nvim_buf_set_lines(buffer, 0, -1, false, { "my unsaved edit" })
+
+  require("ngit").open({ cwd = root })
+  truthy(vim.wait(10000, function()
+    local session = require("ngit")._active_session()
+    return session and #(session.panels.branches.entries or {}) >= 2
+  end, 10))
+  local session = require("ngit")._active_session()
+  session:switch_view("branches")
+  for _, entry in ipairs(session.panels.branches.entries) do
+    if entry.kind == "branch" and entry.branch.name == "topic" then
+      session:select_entry(entry)
+    end
+  end
+  return root, path, buffer, session
+end
+
+-- Answers every picker: operations are confirmed, and the save prompt gets
+-- `save_answer`. Returns the prompts seen and a function restoring the picker.
+local function answer_pickers(save_answer)
+  local prompts = {}
+  local original = vim.ui.select
+  vim.ui.select = function(items, opts, on_choice)
+    prompts[#prompts + 1] = opts.prompt
+    local wanted = opts.prompt:find("unsaved changes", 1, true) and save_answer or nil
+    for index, item in ipairs(items) do
+      if (wanted and vim.startswith(item, wanted)) or (not wanted and item ~= "Cancel") then
+        on_choice(item, index)
+        return
+      end
+    end
+    on_choice(items[1], 1)
+  end
+  return prompts, function()
+    vim.ui.select = original
+  end
+end
+
+local function saw_save_prompt(prompts)
+  for _, prompt in ipairs(prompts) do
+    if prompt:find("shared.txt has unsaved changes", 1, true) then
+      return true
+    end
+  end
+  return false
+end
+
+test("an operation over an unsaved buffer asks to save first, and cancel runs nothing", function()
+  local root, path, buffer, session = unsaved_over_incoming_change()
+  local head = git(root, { "rev-parse", "HEAD" }).stdout
+  local prompts, restore = answer_pickers("Cancel")
+  session:start_operation("merge")
+  restore()
+
+  truthy(saw_save_prompt(prompts), vim.inspect(prompts))
+  equal(head, git(root, { "rev-parse", "HEAD" }).stdout, "the merge ran anyway")
+  truthy(vim.bo[buffer].modified, "the buffer was saved without being asked")
+  equal("base\n", read_file(path))
+  require("ngit").close()
+  vim.api.nvim_buf_delete(buffer, { force = true })
+end)
+
+test("saving first hands the edit to git, which refuses to overwrite it", function()
+  local root, path, buffer, session = unsaved_over_incoming_change()
+  local head = git(root, { "rev-parse", "HEAD" }).stdout
+  local prompts, restore = answer_pickers("Save and continue")
+  local errors = {}
+  local original_notify = vim.notify
+  vim.notify = function(message, level)
+    if level == vim.log.levels.ERROR then
+      errors[#errors + 1] = message
+    end
+  end
+  session:start_operation("merge")
+  truthy(
+    vim.wait(10000, function()
+      return #errors > 0
+    end, 10),
+    "git never answered the merge"
+  )
+  vim.notify = original_notify
+  restore()
+  truthy(errors[1]:find("would be overwritten", 1, true), errors[1])
+
+  truthy(saw_save_prompt(prompts), vim.inspect(prompts))
+  truthy(not vim.bo[buffer].modified, "the buffer was not saved")
+  equal("my unsaved edit\n", read_file(path))
+  equal(head, git(root, { "rev-parse", "HEAD" }).stdout, "git merged over the saved edit")
+  require("ngit").close()
+  vim.api.nvim_buf_delete(buffer, { force = true })
+end)
+
+test("an operation with nothing unsaved runs without an extra prompt", function()
+  local root, _, buffer, session = unsaved_over_incoming_change()
+  vim.api.nvim_buf_call(buffer, function()
+    vim.cmd("silent edit!")
+  end)
+  truthy(not vim.bo[buffer].modified)
+  local prompts, restore = answer_pickers("Cancel")
+  session:primary_action()
+  restore()
+
+  equal({}, prompts)
+  truthy(
+    vim.wait(10000, function()
+      return git(root, { "branch", "--show-current" }).stdout == "topic\n"
+    end, 10),
+    "the switch did not run"
+  )
+  require("ngit").close()
+  vim.api.nvim_buf_delete(buffer, { force = true })
+end)
+
+test("only commands that write the worktree ask to save first", function()
+  local _, _, buffer, session = unsaved_over_incoming_change()
+  local remote_backend = require("ngit.git.remote")
+  local sequencer_backend = require("ngit.git.sequencer")
+  local original_stream, original_run = remote_backend.stream, sequencer_backend.run
+  local streamed, sequenced = {}, {}
+  remote_backend.stream = function(_, args, _, callback)
+    streamed[#streamed + 1] = args[1]
+    callback(true, { code = 0 })
+  end
+  sequencer_backend.run = function(_, _, action, callback)
+    sequenced[#sequenced + 1] = action
+    callback(true, nil)
+  end
+  local prompts, restore = answer_pickers("Cancel")
+
+  session:run_remote("fetch")
+  session:run_remote("pull")
+  session.operation = "merge"
+  session:run_sequencer("continue")
+  session:run_sequencer("abort")
+  session.operation = nil
+  restore()
+  remote_backend.stream, sequencer_backend.run = original_stream, original_run
+
+  -- The fetch and the abort ran without asking; the pull and the continue asked
+  -- and were cancelled.
+  equal({ "fetch" }, streamed)
+  equal({ "abort" }, sequenced)
+  local asked = 0
+  for _, prompt in ipairs(prompts) do
+    if prompt:find("unsaved changes", 1, true) then
+      asked = asked + 1
+    end
+  end
+  equal(2, asked, vim.inspect(prompts))
+  require("ngit").close()
+  vim.api.nvim_buf_delete(buffer, { force = true })
+end)
+
 test("a revert rereads open buffers of the files it rewrote", function()
   local root = repository()
   write_file(vim.fs.joinpath(root, "shown.txt"), "old\n")

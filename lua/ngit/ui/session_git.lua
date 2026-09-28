@@ -72,13 +72,15 @@ function M.revert(self)
     ("Revert %s? A new commit undoes it."):format(short_oid(entry.commit.oid)),
     "Revert",
     function()
-      sequencer_backend.start(self.root, "revert", entry.commit.oid, function(ok, err)
-        SessionCommands.settle_operation(self, ok, err, {
-          stopped = function()
-            return "revert stopped for conflict resolution"
-          end,
-          failed = "Unable to revert",
-        })
+      SessionCommands.with_saved_buffers(self, function()
+        sequencer_backend.start(self.root, "revert", entry.commit.oid, function(ok, err)
+          SessionCommands.settle_operation(self, ok, err, {
+            stopped = function()
+              return "revert stopped for conflict resolution"
+            end,
+            failed = "Unable to revert",
+          })
+        end)
       end)
     end
   )
@@ -142,7 +144,9 @@ function M.checkout_commit(self)
     return
   end
   Menu.confirm(("Check out %s with a detached HEAD?"):format(label), "Detach HEAD", function()
-    branch_backend.detach(self.root, revision, settler(self))
+    SessionCommands.with_saved_buffers(self, function()
+      branch_backend.detach(self.root, revision, settler(self))
+    end)
   end)
 end
 
@@ -182,13 +186,15 @@ local function open_rebase_editor(self, base, label)
       label = label,
       steps = steps,
       on_submit = function(plan)
-        sequencer_backend.rebase_with_todo(self.root, base, plan, function(ok, rebase_err)
-          SessionCommands.settle_operation(self, ok, rebase_err, {
-            stopped = function(active)
-              return ("%s stopped; amend or resolve, then continue"):format(active)
-            end,
-            failed = "Unable to rebase",
-          })
+        SessionCommands.with_saved_buffers(self, function()
+          sequencer_backend.rebase_with_todo(self.root, base, plan, function(ok, rebase_err)
+            SessionCommands.settle_operation(self, ok, rebase_err, {
+              stopped = function(active)
+                return ("%s stopped; amend or resolve, then continue"):format(active)
+              end,
+              failed = "Unable to rebase",
+            })
+          end)
         end)
       end,
       on_close = function()
@@ -215,7 +221,9 @@ function M.interactive_rebase(self)
       label = "Autosquash from this commit",
       detail = "fold fixup! and squash! commits in",
       action = function()
-        sequencer_backend.rebase_autosquash(self.root, oid .. "~1", settler(self))
+        SessionCommands.with_saved_buffers(self, function()
+          sequencer_backend.rebase_autosquash(self.root, oid .. "~1", settler(self))
+        end)
       end,
     }
   end
@@ -253,11 +261,13 @@ function M.interactive_rebase(self)
           notify(err or "No upstream to rebase onto", vim.log.levels.WARN)
           return
         end
-        sequencer_backend.rebase_autosquash(
-          self.root,
-          (spec:gsub("%.%.%.HEAD$", "")),
-          settler(self)
-        )
+        SessionCommands.with_saved_buffers(self, function()
+          sequencer_backend.rebase_autosquash(
+            self.root,
+            (spec:gsub("%.%.%.HEAD$", "")),
+            settler(self)
+          )
+        end)
       end)
     end,
   }
@@ -487,13 +497,17 @@ function M.stash_menu(self)
     items[#items + 1] = {
       label = ("Apply %s and restore the index"):format(stash.ref),
       action = function()
-        stash_backend.apply(self.root, stash, { index = true }, settler(self))
+        SessionCommands.with_saved_buffers(self, function()
+          stash_backend.apply(self.root, stash, { index = true }, settler(self))
+        end)
       end,
     }
     items[#items + 1] = {
       label = ("Pop %s and restore the index"):format(stash.ref),
       action = function()
-        stash_backend.pop(self.root, stash, { index = true }, settler(self))
+        SessionCommands.with_saved_buffers(self, function()
+          stash_backend.pop(self.root, stash, { index = true }, settler(self))
+        end)
       end,
     }
     items[#items + 1] = {
@@ -501,7 +515,9 @@ function M.stash_menu(self)
       detail = "for a stash that no longer applies",
       action = function()
         Menu.ask("New branch name: ", nil, function(name)
-          stash_backend.branch(self.root, name, stash, settler(self))
+          SessionCommands.with_saved_buffers(self, function()
+            stash_backend.branch(self.root, name, stash, settler(self))
+          end)
         end)
       end,
     }

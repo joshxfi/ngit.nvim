@@ -5,6 +5,7 @@ local mutate = require("ngit.git.mutate")
 local remote_backend = require("ngit.git.remote")
 local sequencer_backend = require("ngit.git.sequencer")
 local stash_backend = require("ngit.git.stash")
+local Menu = require("ngit.ui.menu")
 local Steps = require("ngit.util.steps")
 
 local M = {}
@@ -131,6 +132,23 @@ local function refuse_unsaved(path)
   return false
 end
 
+--- Loaded buffers of files under the root that carry unsaved edits.
+---@return { buffer: integer, path: string }[]
+local function unsaved_under_root(self)
+  local root = vim.uv.fs_realpath(self.root) or self.root
+  local found = {}
+  for _, buffer in ipairs(vim.api.nvim_list_bufs()) do
+    if unsaved(buffer) and vim.bo[buffer].buftype == "" then
+      local name = vim.api.nvim_buf_get_name(buffer)
+      local real = name ~= "" and (vim.uv.fs_realpath(name) or name) or ""
+      if vim.startswith(real, root .. "/") then
+        found[#found + 1] = { buffer = buffer, path = real:sub(#root + 2) }
+      end
+    end
+  end
+  return found
+end
+
 --- Refuses to overwrite a file that has unsaved edits in a loaded buffer. With
 --- no paths every file under the root counts, for operations such as a hard
 --- reset that can rewrite any of them.
@@ -144,20 +162,75 @@ local function worktree_is_safe(self, paths)
     end
     return true
   end
-  local root = vim.uv.fs_realpath(self.root) or self.root
-  for _, buffer in ipairs(vim.api.nvim_list_bufs()) do
-    if unsaved(buffer) then
-      local name = vim.api.nvim_buf_get_name(buffer)
-      local real = name ~= "" and (vim.uv.fs_realpath(name) or name) or ""
-      if vim.startswith(real, root .. "/") then
-        return refuse_unsaved(real:sub(#root + 2))
-      end
-    end
+  local pending = unsaved_under_root(self)
+  if pending[1] then
+    return refuse_unsaved(pending[1].path)
   end
   return true
 end
 
 M.worktree_is_safe = worktree_is_safe
+
+--- Runs an operation that brings other content into worktree files: a switch,
+--- merge, rebase, cherry-pick, revert, stash apply, or pull.
+---
+--- Git refuses to overwrite a file with uncommitted changes, but it only sees
+--- the disk, so an unsaved buffer over a clean file would be rewritten under
+--- the edit. Saving first turns the edit into a change git protects, and git
+--- then decides exactly which operations it blocks. The save is offered rather
+--- than done, because a write runs the reader's save hooks.
+---
+--- Operations that discard work by design, such as a hard reset, refuse through
+--- `worktree_is_safe` instead: saving before them would only make the loss final.
+---@param perform fun()
+function M.with_saved_buffers(self, perform)
+  local pending = unsaved_under_root(self)
+  if #pending == 0 then
+    perform()
+    return
+  end
+  local prompt, label
+  if #pending == 1 then
+    prompt = ("%s has unsaved changes. Save it before git rewrites the worktree?"):format(
+      pending[1].path
+    )
+    label = "Save and continue"
+  else
+    local names = {}
+    for index = 1, math.min(#pending, 3) do
+      names[#names + 1] = pending[index].path
+    end
+    if #pending > 3 then
+      names[#names + 1] = "…"
+    end
+    prompt = ("%d buffers have unsaved changes (%s). Save them before git rewrites the worktree?"):format(
+      #pending,
+      table.concat(names, ", ")
+    )
+    label = ("Save %d buffers and continue"):format(#pending)
+  end
+  Menu.confirm(prompt, label, function()
+    if self.closed then
+      return
+    end
+    for _, item in ipairs(pending) do
+      local ok, err = pcall(vim.api.nvim_buf_call, item.buffer, function()
+        vim.cmd("silent write")
+      end)
+      if not ok or vim.bo[item.buffer].modified then
+        notify(
+          ("Unable to save %s%s; nothing was run"):format(
+            item.path,
+            ok and "" or (": " .. tostring(err))
+          ),
+          vim.log.levels.ERROR
+        )
+        return
+      end
+    end
+    perform()
+  end)
+end
 
 local function confirm(self, prompt, label, perform)
   if not self.config.confirm_discard then
@@ -471,8 +544,10 @@ function M.primary_action(self)
       notify("Already on " .. entry.branch.name)
       return
     end
-    branch_backend.switch(self.root, entry.branch, function(ok, err)
-      M.after_mutation(self, ok, err)
+    M.with_saved_buffers(self, function()
+      branch_backend.switch(self.root, entry.branch, function(ok, err)
+        M.after_mutation(self, ok, err)
+      end)
     end)
   elseif entry.kind == "commit" then
     vim.fn.setreg("+", entry.commit.oid)
@@ -622,8 +697,10 @@ function M.apply_item(self, pop)
     return
   end
   local action = pop and stash_backend.pop or stash_backend.apply
-  action(self.root, entry.stash, function(ok, err)
-    M.after_mutation(self, ok, err)
+  M.with_saved_buffers(self, function()
+    action(self.root, entry.stash, function(ok, err)
+      M.after_mutation(self, ok, err)
+    end)
   end)
 end
 
@@ -749,18 +826,7 @@ local command_labels = {
   push = "git push",
 }
 
---- Runs a network command in a streaming console.
----
---- Every variant the remote menu offers arrives here, so the console header shows
---- the exact command rather than a friendly name for it, and the missing-upstream
---- retry covers any push rather than only the default one.
----@param args string[]
----@param label string
-function M.run_remote_args(self, args, label)
-  if self.remote_console and self.remote_console.running then
-    notify("A remote operation is already running", vim.log.levels.WARN)
-    return
-  end
+local function launch_remote(self, args, label)
   local Console = require("ngit.ui.console")
   local console = Console.new(label)
   self.remote_console = console
@@ -824,6 +890,28 @@ function M.run_remote_args(self, args, label)
   end)
 end
 
+--- Runs a network command in a streaming console.
+---
+--- Every variant the remote menu offers arrives here, so the console header shows
+--- the exact command rather than a friendly name for it, and the missing-upstream
+--- retry covers any push rather than only the default one.
+---@param args string[]
+---@param label string
+function M.run_remote_args(self, args, label)
+  if self.remote_console and self.remote_console.running then
+    notify("A remote operation is already running", vim.log.levels.WARN)
+    return
+  end
+  -- Of the network commands only a pull writes into the worktree.
+  if args[1] == "pull" then
+    M.with_saved_buffers(self, function()
+      launch_remote(self, args, label)
+    end)
+    return
+  end
+  launch_remote(self, args, label)
+end
+
 function M.run_remote(self, operation)
   M.run_remote_args(self, remote_backend.operations[operation], command_labels[operation])
 end
@@ -881,7 +969,9 @@ function M.run_sequencer(self, action)
       end
     end)
   else
-    perform()
+    -- Continuing replays the next commit over files the reader may just have
+    -- been resolving, so an unsaved resolution is offered a save first.
+    M.with_saved_buffers(self, perform)
   end
 end
 
@@ -909,13 +999,15 @@ function M.start_operation(self, operation)
     if choice ~= "Continue" then
       return
     end
-    sequencer_backend.start(self.root, operation, target, function(ok, err)
-      M.settle_operation(self, ok, err, {
-        stopped = function(active)
-          return ("%s stopped for conflict resolution"):format(active)
-        end,
-        failed = "Unable to start " .. operation,
-      })
+    M.with_saved_buffers(self, function()
+      sequencer_backend.start(self.root, operation, target, function(ok, err)
+        M.settle_operation(self, ok, err, {
+          stopped = function(active)
+            return ("%s stopped for conflict resolution"):format(active)
+          end,
+          failed = "Unable to start " .. operation,
+        })
+      end)
     end)
   end)
 end
