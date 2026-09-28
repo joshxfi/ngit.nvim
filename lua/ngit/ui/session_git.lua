@@ -1079,10 +1079,13 @@ local function conflict_rows(self)
   if not entry or entry.section ~= "conflict" then
     return nil, nil, "Select a conflicted file first"
   end
-  local blocks, err = conflict_backend.blocks(self.root, entry.file.path)
+  local blocks, err, ambiguous = conflict_backend.blocks(self.root, entry.file.path)
   if not blocks then
     return nil, nil, err
   end
+  -- Ambiguous blocks are the ones left to resolve by hand, so navigation has to
+  -- reach them too.
+  vim.list_extend(blocks, ambiguous or {})
   if #blocks == 0 then
     return nil, nil, ("%s carries no conflict markers"):format(entry.file.path)
   end
