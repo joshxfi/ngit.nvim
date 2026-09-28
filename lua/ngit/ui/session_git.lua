@@ -1084,10 +1084,15 @@ function M.jump_conflict(self, direction)
     return
   end
   -- The preview of a conflicted file is index-to-worktree, so its new-side line
-  -- numbers are the worktree lines the markers sit on.
+  -- numbers are the worktree lines the markers sit on. Side by side, the rows of
+  -- both panes are aligned, and only the right one carries new-side numbers.
+  local numbers = pane.new_numbers
+  if self.dashboard.preview.layout == "side_by_side" then
+    numbers = self.current_diff_models.split.right.source_numbers
+  end
   local rows = {}
   for _, block in ipairs(blocks) do
-    for row, number in pairs(pane.source_numbers) do
+    for row, number in pairs(numbers) do
       if number == block.start then
         rows[#rows + 1] = row
       end
