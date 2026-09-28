@@ -228,8 +228,11 @@ recomputed after `:colorscheme`; see `:help ngit-highlights` to override them.
 ## Safety
 
 Read operations run with `GIT_OPTIONAL_LOCKS=0`, and commands use argument
-arrays and literal pathspecs rather than a shell. Discards are confirmed and
-never overwrite a file with unsaved changes in a loaded buffer.
+arrays and literal pathspecs rather than a shell. Discards, hard resets, and
+restores are confirmed and never overwrite a file with unsaved changes in a
+loaded buffer. A switch, merge, rebase, cherry-pick, revert, stash apply, or pull
+first offers to save such buffers, so Git sees the edits and refuses to
+overwrite them the way it refuses for any uncommitted change.
 
 Branch deletion asks Git first and only offers the forced form once Git has
 called the branch unmerged, naming what would be lost. The default pull is

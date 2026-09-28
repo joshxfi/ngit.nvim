@@ -442,14 +442,19 @@ outside the repository do not trigger one.
 
 Every discard is confirmed and states its exact effect, deleting an untracked
 file only when that is what was asked for. A file with unsaved changes in a
-loaded buffer is never overwritten, and buffers are rechecked after any
-mutation. Renames are acted on through both of their paths so no half-staged
-entry is left behind. Branch deletion asks Git first and only offers the forced
-form once Git has reported the branch unmerged, naming what would be lost. The
-default pull is fast-forward-only. The only forcing push offered is
---force-with-lease, which refuses when the remote moved since the last fetch;
-plain --force is not exposed. Deleting a remote branch says that it affects
-everyone using it. Remote progress appears in a cancellable floating console.
+loaded buffer is never overwritten by a discard, hard reset, or restore, and
+buffers are rechecked after any mutation. A switch, merge, rebase,
+cherry-pick, revert, continue, stash apply, or pull that finds such buffers
+offers to save them first: Git only protects uncommitted changes it can see on
+disk, and once saved it refuses to overwrite them. Cancel is the default,
+since a save runs your write hooks. Renames are acted on through both of their
+paths so no half-staged entry is left behind. Branch deletion asks Git first
+and only offers the forced form once Git has reported the branch unmerged,
+naming what would be lost. The default pull is fast-forward-only. The only
+forcing push offered is --force-with-lease, which refuses when the remote
+moved since the last fetch; plain --force is not exposed. Deleting a remote
+branch says that it affects everyone using it. Remote progress appears in a
+cancellable floating console.
 
 Review mode is read-only by construction: a revision range has no index and no
 worktree side, so staging and discarding are refused there rather than passed to
