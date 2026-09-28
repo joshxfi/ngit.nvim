@@ -1951,6 +1951,65 @@ test("X in the diff never falls back to discarding the whole file", function()
   require("ngit").setup()
 end)
 
+test("a change with no hunks still acts on the whole file from the diff", function()
+  local root = repository()
+  local blob = vim.fs.joinpath(root, "image.bin")
+  write_file(blob, "\0\1\2binary\0")
+  git(root, { "add", "image.bin" })
+  git(root, { "commit", "-q", "-m", "initial" })
+  write_file(blob, "\0\3\4changed\0")
+
+  require("ngit").setup({ diff_layout = "unified" })
+  require("ngit").open({ cwd = root })
+  truthy(vim.wait(10000, function()
+    local session = require("ngit")._active_session()
+    return session and session.current_diff_models and session.current_diff_models.unified
+  end, 10))
+  local session = require("ngit")._active_session()
+  equal(0, #session.current_diff.hunks, "a binary diff unexpectedly carries hunks")
+  session.dashboard:focus_preview()
+  vim.api.nvim_win_set_cursor(session.dashboard.preview.unified.window, { 1, 0 })
+
+  local patch, err = session:selection_patch(false)
+  equal(nil, patch)
+  equal(nil, err)
+  session:stage()
+  truthy(
+    vim.wait(10000, function()
+      return git(root, { "diff", "--cached", "--name-only" }).stdout == "image.bin\n"
+    end, 10),
+    "the binary file was not staged from the diff"
+  )
+  require("ngit").close()
+  require("ngit").setup()
+end)
+
+test("a diff that failed to load says so, and the header is not a diff pane", function()
+  local root = repository()
+  write_file(vim.fs.joinpath(root, "plain.txt"), "one\n")
+  git(root, { "add", "plain.txt" })
+  git(root, { "commit", "-q", "-m", "initial" })
+  write_file(vim.fs.joinpath(root, "plain.txt"), "two\n")
+
+  require("ngit").open({ cwd = root })
+  truthy(vim.wait(10000, function()
+    local session = require("ngit")._active_session()
+    return session and session.current_diff ~= nil
+  end, 10))
+  local session = require("ngit")._active_session()
+  session.dashboard:focus_preview()
+
+  session.current_diff, session.current_diff_models = nil, nil
+  session.preview_error = "fatal: simulated"
+  local patch, err = session:selection_patch(true)
+  equal(nil, patch)
+  truthy(err and err:find("could not be loaded", 1, true), err)
+
+  vim.api.nvim_set_current_win(session.dashboard.preview.header.window)
+  truthy(not session:preview_focused(), "the header window was treated as a diff pane")
+  require("ngit").close()
+end)
+
 test("hard reset and restore refuse while a buffer has unsaved edits", function()
   local root = repository()
   write_file(vim.fs.joinpath(root, "kept.txt"), "committed\n")

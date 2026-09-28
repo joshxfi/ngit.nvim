@@ -865,6 +865,7 @@ function Session:load_preview()
   self.current_diff = nil
   self.current_diff_models = nil
   self.current_diff_opts = nil
+  self.preview_error = nil
 
   if self.diff_job then
     pcall(self.diff_job.kill, self.diff_job, 15)
@@ -899,10 +900,8 @@ function Session:load_preview()
         return
       end
       if not diff then
-        self.dashboard:render_preview(
-          { "", "  " .. (err or "Unable to load diff") },
-          "Unable to load preview"
-        )
+        self.preview_error = err or "Unable to load diff"
+        self.dashboard:render_preview({ "", "  " .. self.preview_error }, "Unable to load preview")
         return
       end
       self.cache:set(key, diff)
@@ -1000,12 +999,14 @@ function Session:render_diff_layout(layout)
   return rendered_layout
 end
 
---- Whether the cursor is in one of the diff windows, whatever they are showing.
+--- Whether the cursor is in one of the diff panes, whatever they are showing.
+--- The header above them is left out: it carries no hunk keys of its own.
 ---@return boolean
 function Session:preview_focused()
   local current = vim.api.nvim_get_current_win()
-  for _, item in ipairs(self.dashboard:preview_windows()) do
-    if item.window == current then
+  local preview = self.dashboard.preview
+  for _, item in ipairs({ preview.left, preview.right, preview.unified }) do
+    if item and item.window == current then
       return true
     end
   end
@@ -1113,10 +1114,13 @@ end
 function Session:selection_patch(reverse)
   local pane, window = self:preview_pane()
   if not pane or not self.current_diff then
-    -- Pressed in the diff, a key means "this change". While the preview is still
-    -- loading there is no change to point at, and acting on the whole file
-    -- instead would turn a hunk discard into a file discard.
+    -- Pressed in the diff, a key means "this change". Until a diff is shown there
+    -- is no change to point at, and acting on the whole file instead would turn
+    -- a hunk discard into a file discard.
     if self:preview_focused() then
+      if self.preview_error then
+        return nil, "The diff could not be loaded; act on the file from the Changes panel"
+      end
       return nil, "The diff is still loading; try again once it is shown"
     end
     return nil, nil
@@ -1130,6 +1134,12 @@ function Session:selection_patch(reverse)
   -- reading aid rather than a faithful patch. Whole files still stage.
   if self.config.ignore_whitespace then
     return nil, "Hunk actions are disabled while whitespace is ignored"
+  end
+
+  -- A binary file, a mode change or a pure rename has no hunk to point at, so
+  -- the file is the only thing the key can mean, wherever the cursor is.
+  if #(self.current_diff.hunks or {}) == 0 then
+    return nil, nil
   end
 
   local first, last = selected_rows(window)
