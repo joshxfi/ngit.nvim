@@ -240,7 +240,8 @@ fetch. Plain --force is not offered at all.
 co, ct, and cb take ours, theirs, or both sides. Pressed in the Changes panel
 they act on the whole file; pressed in the diff they resolve only the conflict
 block the cursor sits in, so one file can take ours here and theirs there. ]x
-and [x move between the blocks.
+and [x move between the blocks. The diff of a conflicted file compares our side
+of the index with the worktree, so every marker sits on its own worktree line.
 
 Taking a side for a whole file goes through `git checkout --ours`, which restores
 the recorded stage exactly, including a file one side deleted. The per-block form

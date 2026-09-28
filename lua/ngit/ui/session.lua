@@ -1188,8 +1188,8 @@ function Session:preview_location()
     return nil, nil
   end
   -- An old-side number names a line the current file no longer has, so the new
-  -- side is preferred whenever the layout has one.
-  local number = pane.source_numbers[row]
+  -- side is preferred whenever the row has one.
+  local number = pane.new_numbers[row] or pane.source_numbers[row]
   if self.dashboard.preview.layout == "side_by_side" then
     number = self.current_diff_models.split.right.source_numbers[row] or number
   end

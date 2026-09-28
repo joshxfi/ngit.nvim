@@ -73,6 +73,11 @@ local function pane()
   return {
     lines = {},
     source_numbers = {},
+    -- Worktree-side line of each row, or false where the row has none. The
+    -- gutter shows the old number on a unified context row, but anything that
+    -- points back into the file, such as opening it or finding a conflict block,
+    -- needs the line the file has now.
+    new_numbers = {},
     source_kinds = {},
     row_hunks = {},
     -- Row in the raw unified diff that produced this display row. Line-level
@@ -85,9 +90,10 @@ local function pane()
   }
 end
 
-local function append(target, text, number, kind, hunk, unified_row)
+local function append(target, text, number, kind, hunk, unified_row, new_number)
   target.lines[#target.lines + 1] = sanitize(text)
   target.source_numbers[#target.lines] = number or false
+  target.new_numbers[#target.lines] = new_number or false
   target.source_kinds[#target.lines] = kind or false
   target.unified_rows[#target.lines] = unified_row or false
   if hunk then
@@ -292,11 +298,11 @@ function M.unified(diff, opts, split)
       append(unified, "- " .. left, left_number, "delete", hunk, left_source or nil)
       append_inline(left_inline[row], 2)
       if right_group == "NgitDiffAdd" or right_group == "NgitDiffChange" then
-        append(unified, "+ " .. right, right_number, "add", hunk, right_source or nil)
+        append(unified, "+ " .. right, right_number, "add", hunk, right_source or nil, right_number)
         append_inline(right_inline[row], 2)
       end
     elseif right_group == "NgitDiffAdd" then
-      append(unified, "+ " .. right, right_number, "add", hunk, right_source or nil)
+      append(unified, "+ " .. right, right_number, "add", hunk, right_source or nil, right_number)
       append_inline(right_inline[row], 2)
     elseif left_group == "NgitDiffFiller" and right_group == "NgitDiffFiller" then
       append(unified, left ~= "" and left or right, nil, "filler", hunk)
@@ -307,7 +313,8 @@ function M.unified(diff, opts, split)
         left_number or right_number,
         nil,
         hunk,
-        left_source or right_source or nil
+        left_source or right_source or nil,
+        right_number
       )
     end
   end

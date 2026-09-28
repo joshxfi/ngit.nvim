@@ -330,6 +330,13 @@ local function args_for(section, path, context, opts)
   end
   if section == "staged" then
     args[#args + 1] = "--cached"
+  elseif section == "conflict" then
+    -- A plain diff of an unmerged path is the combined `diff --cc` form, which
+    -- carries no line numbers the preview can map back to the worktree, so
+    -- navigating and resolving one block would have nothing to point at. Our
+    -- side of the index against the worktree is an ordinary two-way diff whose
+    -- new side is exactly the file with its markers.
+    args[#args + 1] = "--ours"
   elseif section == "untracked" then
     return {
       "diff",

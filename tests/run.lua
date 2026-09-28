@@ -1367,6 +1367,45 @@ test("opening a file from the diff lands on the reviewed line", function()
   require("ngit").setup()
 end)
 
+test("a unified context row points at the line the file has now", function()
+  local root = repository()
+  local original = {}
+  for index = 1, 30 do
+    original[index] = ("line %02d"):format(index)
+  end
+  write_file(vim.fs.joinpath(root, "shifted.txt"), table.concat(original, "\n") .. "\n")
+  git(root, { "add", "shifted.txt" })
+  git(root, { "commit", "-q", "-m", "initial" })
+  local changed = { "new a", "new b", "new c" }
+  vim.list_extend(changed, original)
+  changed[3 + 20] = "changed twenty"
+  write_file(vim.fs.joinpath(root, "shifted.txt"), table.concat(changed, "\n") .. "\n")
+
+  require("ngit").setup({ diff_layout = "unified" })
+  require("ngit").open({ cwd = root })
+  truthy(vim.wait(10000, function()
+    local session = require("ngit")._active_session()
+    return session and session.current_diff_models and session.current_diff_models.unified
+  end, 10))
+  local session = require("ngit")._active_session()
+  session.dashboard:focus_preview()
+  local pane = session.current_diff_models.unified.unified
+  local context
+  for row, text in ipairs(pane.lines) do
+    if text == "  line 19" then
+      context = row
+    end
+  end
+  truthy(context, "the context row was not found")
+  vim.api.nvim_win_set_cursor(session.dashboard.preview.unified.window, { context, 0 })
+  local path, line = session:preview_location()
+  equal("shifted.txt", path)
+  -- Old line 19 is line 22 now, after the three lines inserted above it.
+  equal(22, line)
+  require("ngit").close()
+  require("ngit").setup()
+end)
+
 test("session renders a real repository and closes cleanly", function()
   local root = repository()
   write_file(vim.fs.joinpath(root, "visible.txt"), "hello\n")
@@ -2849,6 +2888,78 @@ test("a real conflict can be resolved one block at a time and then staged", func
   truthy(not resolved:find("<<<<<<<", 1, true))
   equal("", git(root, { "diff", "--name-only", "--diff-filter=U" }).stdout)
 end)
+
+for _, layout in ipairs({ "unified", "side_by_side" }) do
+  test(("conflict keys in the %s diff act on the block under the cursor"):format(layout), function()
+    local root = repository()
+    local base = { "one", "two", "three", "four", "five", "six", "seven", "eight", "nine" }
+    local path = vim.fs.joinpath(root, "both.txt")
+    write_file(path, table.concat(base, "\n") .. "\n")
+    git(root, { "add", "both.txt" })
+    git(root, { "commit", "-q", "-m", "base" })
+    git(root, { "switch", "-q", "-c", "topic" })
+    local theirs = vim.deepcopy(base)
+    theirs[1] = "theirs first"
+    theirs[9] = "theirs last"
+    write_file(path, table.concat(theirs, "\n") .. "\n")
+    git(root, { "commit", "-q", "-am", "topic edits" })
+    git(root, { "switch", "-q", "main" })
+    local ours = vim.deepcopy(base)
+    ours[1] = "ours first"
+    ours[9] = "ours last"
+    write_file(path, table.concat(ours, "\n") .. "\n")
+    git(root, { "commit", "-q", "-am", "main edits" })
+    git(root, { "merge", "-q", "topic" }, { accept = { [1] = true } })
+    local blocks = assert(require("ngit.git.conflict").blocks(root, "both.txt"))
+    equal(2, #blocks)
+
+    require("ngit").setup({ diff_layout = layout })
+    require("ngit").open({ cwd = root })
+    truthy(vim.wait(10000, function()
+      local session = require("ngit")._active_session()
+      local entry = session and session:selected_entry()
+      return entry and entry.section == "conflict" and session.current_diff_models ~= nil
+    end, 10))
+    local session = require("ngit")._active_session()
+    session.dashboard:focus_preview(layout == "side_by_side" and "left" or nil)
+
+    local warnings = {}
+    local original_notify = vim.notify
+    vim.notify = function(message, level)
+      if level == vim.log.levels.WARN then
+        warnings[#warnings + 1] = message
+      end
+    end
+    -- From the top of the preview, the next block is the second one's opener only
+    -- after the first has been visited.
+    local window = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_cursor(window, { 1, 0 })
+    session:jump_conflict(1)
+    local _, first_line = session:preview_location()
+    session:jump_conflict(1)
+    local _, second_line = session:preview_location()
+    vim.notify = original_notify
+    equal({}, warnings)
+    equal(blocks[1].start, first_line, "]x did not land on the first block")
+    equal(blocks[2].start, second_line, "]x did not land on the second block")
+
+    -- Taking a side here resolves only this block, never the whole file.
+    session:choose_conflict("theirs")
+    truthy(
+      vim.wait(10000, function()
+        return read_file(path):find("theirs last", 1, true) ~= nil
+          and read_file(path):find(">>>>>>>", 1, true) ~= nil
+      end, 10),
+      "the block under the cursor was not the only one resolved"
+    )
+    local content = read_file(path)
+    truthy(content:find("<<<<<<< HEAD\nours first", 1, true), "the first block was resolved too")
+    truthy(not content:find("ours last", 1, true), "the second block kept its ours side")
+    equal("both.txt\n", git(root, { "diff", "--name-only", "--diff-filter=U" }).stdout)
+    require("ngit").close()
+    require("ngit").setup()
+  end)
+end
 
 test("conflict markers are delimited at the length the block opens with", function()
   local conflict = require("ngit.git.conflict")

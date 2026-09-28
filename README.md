@@ -83,7 +83,7 @@ actions do:
 | Staged    | `HEAD` to index        | `HEAD`, index and worktree both       |
 | Unstaged  | index to worktree      | the staged content                    |
 | Untracked | empty file to worktree | deletes the file                      |
-| Conflicts | index to worktree      | refused; use `co`/`ct`/`cb`, or abort |
+| Conflicts | our side to worktree   | refused; use `co`/`ct`/`cb`, or abort |
 | Range     | the two revisions      | refused; review mode is read-only     |
 
 `s`, `u`, and `X` work at three scopes. From the file panel they act on the
