@@ -810,8 +810,11 @@ function M.choose_conflict(self, side)
   if not entry or entry.section ~= "conflict" then
     return
   end
-  local function settle(ok, err)
+  local function settle(ok, err, warning)
     M.after_mutation(self, ok, err)
+    if ok and warning then
+      notify(warning, vim.log.levels.WARN)
+    end
   end
   if not worktree_is_safe(self, { entry.file.path }) then
     return

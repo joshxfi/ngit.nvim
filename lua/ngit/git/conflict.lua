@@ -3,10 +3,9 @@ local runner = require("ngit.git.runner")
 
 local M = {}
 
-local ours_marker = "<<<<<<<"
-local base_marker = "|||||||"
-local split_marker = "======="
-local theirs_marker = ">>>>>>>"
+-- Git writes seven marker characters unless a `conflict-marker-size`
+-- attribute asks for more, so seven is only the shortest run that can count.
+local min_marker_size = 7
 
 ---@class NgitConflictBlock
 ---@field start integer Line carrying the `<<<<<<<` marker.
@@ -15,26 +14,30 @@ local theirs_marker = ">>>>>>>"
 ---@field base? integer Line carrying the `|||||||` marker, in diff3 style.
 ---@field ours_label string
 ---@field theirs_label string
+---@field size integer Length of the marker runs that delimit this block.
 
---- Label after a marker, or nil when the line is not that marker.
+--- Length and label of a marker line, or nil when the line is not one.
 ---
---- Git writes every marker as exactly seven characters followed by a space and
---- a label, or by the end of the line. Anything longer is text that happens to
---- start the same way: a Markdown or reStructuredText underline, or the longer
---- markers git itself nests inside a recursive merge base.
+--- A marker is a run of one character, at least seven long, followed by a space
+--- and a label or by the end of the line. Which runs delimit a block is settled
+--- by its opening line: git writes all four markers of a block at one length,
+--- so a longer run inside it is text that happens to look the same, such as a
+--- Markdown or reStructuredText underline, or the longer markers git nests
+--- inside a recursive merge base.
 ---@param line string
----@param marker string
----@return string?
-local function marker_label(line, marker)
-  if line:sub(1, #marker) ~= marker then
+---@param char string
+---@return integer? size, string? label
+local function marker(line, char)
+  local run = line:match("^" .. vim.pesc(char) .. "+")
+  if not run or #run < min_marker_size then
     return nil
   end
-  local rest = line:sub(#marker + 1):gsub("\r$", "")
+  local rest = line:sub(#run + 1):gsub("\r$", "")
   if rest == "" then
-    return ""
+    return #run, ""
   end
   if rest:match("^%s") then
-    return vim.trim(rest)
+    return #run, vim.trim(rest)
   end
   return nil
 end
@@ -43,60 +46,71 @@ end
 ---
 --- A block only counts once it is complete: a file can legitimately contain a
 --- line of angle brackets, and half a marker set is not something to rewrite.
---- A block that carries a second separator or base marker cannot be split
---- without guessing which one git wrote, so it is returned separately as
---- ambiguous and never rewritten.
+--- A block that carries a second separator or base marker, or that has a
+--- separator but never closes, cannot be split without guessing which lines git
+--- wrote, so it is returned separately as ambiguous and never rewritten.
 ---@param lines string[]
 ---@return NgitConflictBlock[] blocks, { start: integer, finish: integer }[] ambiguous
 function M.parse_markers(lines)
   local blocks, ambiguous = {}, {}
   local current
+  -- Inside a block only runs of the block's own length are markers.
+  local function at_size(line, char)
+    local size, label = marker(line, char)
+    if size and size == current.size then
+      return label
+    end
+    return nil
+  end
   for index, line in ipairs(lines) do
-    local ours = marker_label(line, ours_marker)
-    if ours then
-      if current then
+    local opening, ours = marker(line, "<")
+    if opening and (not current or opening == current.size) then
+      if current and current.middle then
         ambiguous[#ambiguous + 1] = { start = current.start, finish = index - 1 }
       end
-      current = { start = index, ours_label = ours }
-    elseif current and marker_label(line, base_marker) then
+      current = { start = index, ours_label = ours, size = opening }
+    elseif current and at_size(line, "|") then
       if current.base or current.middle then
         current.ambiguous = true
       else
         current.base = index
       end
-    elseif current and marker_label(line, split_marker) then
+    elseif current and at_size(line, "=") then
       if current.middle then
         current.ambiguous = true
       else
         current.middle = index
       end
-    elseif current and marker_label(line, theirs_marker) then
-      if current.middle and not current.ambiguous then
-        current.finish = index
-        current.theirs_label = marker_label(line, theirs_marker)
-        current.ambiguous = nil
-        blocks[#blocks + 1] = current
-      else
-        ambiguous[#ambiguous + 1] = { start = current.start, finish = index }
+    elseif current then
+      local theirs = at_size(line, ">")
+      if theirs then
+        if current.middle and not current.ambiguous then
+          current.finish = index
+          current.theirs_label = theirs
+          current.ambiguous = nil
+          blocks[#blocks + 1] = current
+        else
+          ambiguous[#ambiguous + 1] = { start = current.start, finish = index }
+        end
+        current = nil
       end
-      current = nil
     end
+  end
+  if current and current.middle then
+    ambiguous[#ambiguous + 1] = { start = current.start, finish = #lines }
   end
   return blocks, ambiguous
 end
 
---- Whether any line still opens or closes a conflict, complete or not. Staging
---- is refused while one does, so a block ngit could not parse is never marked
---- resolved by accident.
+--- Whether any conflict block is left, complete or ambiguous. Staging is refused
+--- while one is, so a block ngit could not parse is never marked resolved by
+--- accident, while a stray marker-shaped line outside a block does not hold the
+--- file hostage.
 ---@param lines string[]
 ---@return boolean
 function M.has_markers(lines)
-  for _, line in ipairs(lines) do
-    if marker_label(line, ours_marker) or marker_label(line, theirs_marker) then
-      return true
-    end
-  end
-  return false
+  local blocks, ambiguous = M.parse_markers(lines)
+  return #blocks > 0 or #ambiguous > 0
 end
 
 --- Body of one side of a block, with the markers and the unwanted side removed.
@@ -176,16 +190,21 @@ local function write_lines(absolute, lines, trailing)
   return true
 end
 
+--- Parsed blocks of a worktree file, plus the ambiguous ones that are left for
+--- the reader to resolve by hand.
 ---@param root string
 ---@param path string
----@return NgitConflictBlock[]?, string?
+---@return NgitConflictBlock[]?, string?, { start: integer, finish: integer }[]?
 function M.blocks(root, path)
   local lines = read_lines(vim.fs.joinpath(root, path))
   if not lines then
     return nil, ("Unable to read %s"):format(path)
   end
-  return M.parse_markers(lines), nil
+  local blocks, ambiguous = M.parse_markers(lines)
+  return blocks, nil, ambiguous
 end
+
+local ambiguous_message = "This conflict block has more than one separator; resolve it by hand"
 
 --- Resolves one block, or every block when `line` is nil, and stages the file
 --- once no markers are left.
@@ -198,7 +217,7 @@ end
 ---@param path string
 ---@param side "ours"|"theirs"|"both"
 ---@param line integer? worktree line inside the block to resolve
----@param callback fun(ok: boolean, err: string?)
+---@param callback fun(ok: boolean, err: string?, warning: string?)
 function M.resolve(root, path, side, line, callback)
   local absolute = vim.fs.joinpath(root, path)
   local lines, trailing = read_lines(absolute)
@@ -209,7 +228,7 @@ function M.resolve(root, path, side, line, callback)
   local blocks, ambiguous = M.parse_markers(lines)
   for _, range in ipairs(ambiguous) do
     if #blocks == 0 or (line and line >= range.start and line <= range.finish) then
-      callback(false, "This conflict block has more than one separator; resolve it by hand")
+      callback(false, ambiguous_message)
       return
     end
   end
@@ -233,14 +252,31 @@ function M.resolve(root, path, side, line, callback)
     end
   end
 
-  if not write_lines(absolute, M.resolve_lines(lines, selected, side), trailing) then
+  local resolved = M.resolve_lines(lines, selected, side)
+  if not write_lines(absolute, resolved, trailing) then
     callback(false, ("Unable to write %s"):format(path))
     return
   end
 
-  if M.has_markers(select(1, read_lines(absolute)) or {}) then
-    -- Still conflicted, so staging now would mark it resolved while markers are
-    -- left in the file. That includes a block too ambiguous to rewrite.
+  -- Still conflicted, so staging now would mark it resolved while markers are
+  -- left in the file. That includes a block too ambiguous to rewrite, which a
+  -- whole-file pass skips; the reader is told rather than left to find it.
+  local remaining, left_ambiguous = M.parse_markers(resolved)
+  if #left_ambiguous > 0 and not line then
+    local count = #left_ambiguous
+    callback(
+      true,
+      nil,
+      ("%d ambiguous conflict block%s left in %s; resolve %s by hand"):format(
+        count,
+        count == 1 and " was" or "s were",
+        path,
+        count == 1 and "it" or "them"
+      )
+    )
+    return
+  end
+  if #remaining > 0 or #left_ambiguous > 0 then
     callback(true, nil)
     return
   end

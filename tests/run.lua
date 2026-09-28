@@ -2815,7 +2815,7 @@ test("a real conflict can be resolved one block at a time and then staged", func
   equal("", git(root, { "diff", "--name-only", "--diff-filter=U" }).stdout)
 end)
 
-test("conflict markers must be exactly seven characters", function()
+test("conflict markers are delimited at the length the block opens with", function()
   local conflict = require("ngit.git.conflict")
   -- A heading underline in the incoming side is text, not a separator.
   local underline = {
@@ -2833,9 +2833,31 @@ test("conflict markers must be exactly seven characters", function()
   equal({ "Ours title" }, conflict.resolve_lines(underline, blocks, "ours"))
   equal({ "Theirs title", "==========" }, conflict.resolve_lines(underline, blocks, "theirs"))
 
-  -- Longer markers are what git nests inside a recursive merge base.
-  local nested = { "<<<<<<<<< inner", "x", "=========", "y", ">>>>>>>>> inner" }
-  equal(0, #conflict.parse_markers(nested))
+  -- A conflict-marker-size attribute makes git write longer markers, and the
+  -- whole block then uses that length.
+  local sized = { "<<<<<<<<<< HEAD", "x", "==========", "y", ">>>>>>>>>> topic" }
+  local sized_blocks = conflict.parse_markers(sized)
+  equal(1, #sized_blocks)
+  equal(10, sized_blocks[1].size)
+  equal({ "y" }, conflict.resolve_lines(sized, sized_blocks, "theirs"))
+
+  -- Inside a seven-character block, the longer markers git nests in a recursive
+  -- merge base are content, not a second block.
+  local nested = {
+    "<<<<<<< HEAD",
+    "ours",
+    "||||||| base",
+    "<<<<<<<<< inner",
+    "=========",
+    ">>>>>>>>> inner",
+    "=======",
+    "theirs",
+    ">>>>>>> topic",
+  }
+  local nested_blocks, nested_ambiguous = conflict.parse_markers(nested)
+  equal(1, #nested_blocks)
+  equal(0, #nested_ambiguous)
+  equal(7, nested_blocks[1].middle)
 
   -- Windows line endings keep the marker and drop the carriage return from the label.
   local crlf = conflict.parse_markers({
@@ -2874,6 +2896,53 @@ test("a conflict block with two separators is ambiguous and never rewritten", fu
   equal({ { start = 1, finish = 7 }, { start = 8, finish = 15 } }, ambiguous)
   truthy(conflict.has_markers(lines))
   truthy(not conflict.has_markers({ "plain", "==========", "text" }))
+  -- A marker-shaped line outside any block, as in docs that show git's markers,
+  -- does not keep a file from being staged.
+  truthy(not conflict.has_markers({ "Git then writes:", ">>>>>>> topic", "and stops." }))
+  -- A block with a separator that never closes is ambiguous, not ignored.
+  local _, open = conflict.parse_markers({ "<<<<<<< HEAD", "a", "=======", "b" })
+  equal({ { start = 1, finish = 4 } }, open)
+end)
+
+test("taking both across a file reports the ambiguous blocks it left", function()
+  local root = repository()
+  local base = { "one", "two", "three", "four", "five", "six", "seven", "eight", "nine" }
+  write_file(vim.fs.joinpath(root, "mixed.txt"), table.concat(base, "\n") .. "\n")
+  git(root, { "add", "mixed.txt" })
+  git(root, { "commit", "-q", "-m", "base" })
+  git(root, { "switch", "-q", "-c", "topic" })
+  local theirs = vim.deepcopy(base)
+  theirs[1] = "theirs one"
+  theirs[9] = "theirs nine\n=======\nmore"
+  write_file(vim.fs.joinpath(root, "mixed.txt"), table.concat(theirs, "\n") .. "\n")
+  git(root, { "commit", "-q", "-am", "topic" })
+  git(root, { "switch", "-q", "main" })
+  local ours = vim.deepcopy(base)
+  ours[1] = "ours one"
+  ours[9] = "ours nine"
+  write_file(vim.fs.joinpath(root, "mixed.txt"), table.concat(ours, "\n") .. "\n")
+  git(root, { "commit", "-q", "-am", "main" })
+  git(root, { "merge", "-q", "topic" }, { accept = { [1] = true } })
+
+  local conflict = require("ngit.git.conflict")
+  local blocks, _, ambiguous = conflict.blocks(root, "mixed.txt")
+  equal(1, #blocks)
+  equal(1, #ambiguous)
+
+  -- wait_for packs its arguments into a table, which drops everything after a
+  -- nil hole, so the missing error is passed on as false.
+  local ok, err, warning = wait_for(function(done)
+    conflict.choose(root, "mixed.txt", "both", function(...)
+      local success, message, notice = ...
+      done(success, message or false, notice)
+    end)
+  end)
+  equal(true, ok, err or nil)
+  truthy(warning and warning:find("1 ambiguous conflict block", 1, true), warning)
+  local content = read_file(vim.fs.joinpath(root, "mixed.txt"))
+  truthy(content:find("ours one\ntheirs one", 1, true), "the valid block was not resolved")
+  truthy(content:find("<<<<<<<", 1, true), "the ambiguous block was rewritten")
+  equal("mixed.txt\n", git(root, { "diff", "--name-only", "--diff-filter=U" }).stdout)
 end)
 
 test("an ambiguous conflict is refused and the file stays unmerged", function()
