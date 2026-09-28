@@ -80,50 +80,84 @@ function M.reload_buffers()
 end
 
 function M.after_mutation(self, ok, err)
+  -- A mutation may have rewritten files that are open elsewhere in the editor,
+  -- and one that fails part-way, such as a continue that stops on the next
+  -- conflict, may already have written markers into them.
+  M.reload_buffers()
   if not ok then
     self:set_result(err or "Git operation failed", false)
     notify(err or "Git operation failed", vim.log.levels.ERROR)
     return
   end
-  -- A mutation may have rewritten files that are open elsewhere in the editor.
-  M.reload_buffers()
   self:set_result("Git operation completed", true)
   self:refresh()
 end
 
---- Refuses to overwrite a file that has unsaved edits in a loaded buffer.
+--- Settles a merge, rebase, cherry-pick, or revert, which can stop part-way for
+--- conflicts. A stop is a working state rather than a failure, so the sequencer
+--- is asked what is actually in progress before anything is reported.
+---@param ok boolean
+---@param err string?
+---@param opts { stopped: fun(active: string): string, failed: string }
+function M.settle_operation(self, ok, err, opts)
+  M.reload_buffers()
+  if ok then
+    self:refresh()
+    return
+  end
+  sequencer_backend.detect(self.root, function(active)
+    if self.closed then
+      return
+    end
+    if active then
+      notify(opts.stopped(active), vim.log.levels.WARN)
+      if self.active_panel == "status" then
+        self:refresh()
+      else
+        self:switch_view("status")
+      end
+    else
+      notify(err or opts.failed, vim.log.levels.ERROR)
+    end
+  end)
+end
+
+local function unsaved(buffer)
+  return buffer ~= -1 and vim.api.nvim_buf_is_loaded(buffer) and vim.bo[buffer].modified
+end
+
+local function refuse_unsaved(path)
+  notify(("Save or discard the modified buffer for %s first"):format(path), vim.log.levels.WARN)
+  return false
+end
+
+--- Refuses to overwrite a file that has unsaved edits in a loaded buffer. With
+--- no paths every file under the root counts, for operations such as a hard
+--- reset that can rewrite any of them.
+---@param paths string[]?
 local function worktree_is_safe(self, paths)
-  for _, path in ipairs(paths) do
-    local buffer = vim.fn.bufnr(vim.fs.joinpath(self.root, path))
-    if buffer ~= -1 and vim.api.nvim_buf_is_loaded(buffer) and vim.bo[buffer].modified then
-      notify(("Save or discard the modified buffer for %s first"):format(path), vim.log.levels.WARN)
-      return false
+  if paths then
+    for _, path in ipairs(paths) do
+      if unsaved(vim.fn.bufnr(vim.fs.joinpath(self.root, path))) then
+        return refuse_unsaved(path)
+      end
+    end
+    return true
+  end
+  local root = vim.uv.fs_realpath(self.root) or self.root
+  for _, buffer in ipairs(vim.api.nvim_list_bufs()) do
+    if unsaved(buffer) then
+      local name = vim.api.nvim_buf_get_name(buffer)
+      local real = name ~= "" and (vim.uv.fs_realpath(name) or name) or ""
+      if vim.startswith(real, root .. "/") then
+        return refuse_unsaved(real:sub(#root + 2))
+      end
     end
   end
   return true
 end
 
 M.worktree_is_safe = worktree_is_safe
-
---- The same refusal for operations that can rewrite any file in the worktree,
---- such as a hard reset: every loaded, modified buffer under the root counts.
-function M.worktree_has_no_unsaved_buffers(self)
-  local root = vim.uv.fs_realpath(self.root) or self.root
-  for _, buffer in ipairs(vim.api.nvim_list_bufs()) do
-    if vim.api.nvim_buf_is_loaded(buffer) and vim.bo[buffer].modified then
-      local name = vim.api.nvim_buf_get_name(buffer)
-      local real = name ~= "" and (vim.uv.fs_realpath(name) or name) or ""
-      if vim.startswith(real, root .. "/") then
-        notify(
-          ("Save or discard the modified buffer for %s first"):format(real:sub(#root + 2)),
-          vim.log.levels.WARN
-        )
-        return false
-      end
-    end
-  end
-  return true
-end
 
 local function confirm(self, prompt, label, perform)
   if not self.config.confirm_discard then
@@ -876,23 +910,12 @@ function M.start_operation(self, operation)
       return
     end
     sequencer_backend.start(self.root, operation, target, function(ok, err)
-      M.reload_buffers()
-      if ok then
-        self:refresh()
-        return
-      end
-      sequencer_backend.detect(self.root, function(active)
-        if active then
-          notify(("%s stopped for conflict resolution"):format(active), vim.log.levels.WARN)
-          if self.active_panel == "status" then
-            self:refresh()
-          else
-            self:switch_view("status")
-          end
-        else
-          notify(err or ("Unable to start " .. operation), vim.log.levels.ERROR)
-        end
-      end)
+      M.settle_operation(self, ok, err, {
+        stopped = function(active)
+          return ("%s stopped for conflict resolution"):format(active)
+        end,
+        failed = "Unable to start " .. operation,
+      })
     end)
   end)
 end

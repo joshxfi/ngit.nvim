@@ -2092,6 +2092,41 @@ test("a revert rereads open buffers of the files it rewrote", function()
   vim.api.nvim_buf_delete(buffer, { force = true })
 end)
 
+test("a stash that stops on a conflict still rereads the buffers it rewrote", function()
+  local root = repository()
+  local path = vim.fs.joinpath(root, "shared.txt")
+  write_file(path, "base\n")
+  git(root, { "add", "shared.txt" })
+  git(root, { "commit", "-q", "-m", "initial" })
+  write_file(path, "stashed change\n")
+  git(root, { "stash", "push", "-q" })
+  write_file(path, "a different committed change\n")
+  git(root, { "commit", "-q", "-am", "diverge" })
+  vim.cmd.edit(path)
+  local buffer = vim.api.nvim_get_current_buf()
+
+  require("ngit").open({ cwd = root })
+  truthy(vim.wait(10000, function()
+    local session = require("ngit")._active_session()
+    return session and #(session.panels.stashes.data or {}) > 0
+  end, 10))
+  local session = require("ngit")._active_session()
+  session:switch_view("stashes")
+  local original_notify = vim.notify
+  vim.notify = function() end
+  session:apply_item(false)
+  -- Git exits non-zero here, having written conflict markers into the file.
+  truthy(
+    vim.wait(10000, function()
+      return vim.api.nvim_buf_get_lines(buffer, 0, -1, false)[1] == "<<<<<<< Updated upstream"
+    end, 10),
+    "the open buffer never showed the conflict git wrote"
+  )
+  vim.notify = original_notify
+  require("ngit").close()
+  vim.api.nvim_buf_delete(buffer, { force = true })
+end)
+
 test("stage all and unstage all cover every pending change", function()
   local root = repository()
   write_file(vim.fs.joinpath(root, "a.txt"), "one\n")

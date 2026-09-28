@@ -73,21 +73,12 @@ function M.revert(self)
     "Revert",
     function()
       sequencer_backend.start(self.root, "revert", entry.commit.oid, function(ok, err)
-        SessionCommands.reload_buffers()
-        if ok then
-          self:refresh()
-          return
-        end
-        -- A conflicted revert is a working state rather than a failure, so the
-        -- sequencer is asked what is actually in progress before reporting.
-        sequencer_backend.detect(self.root, function(active)
-          if active then
-            notify("revert stopped for conflict resolution", vim.log.levels.WARN)
-            self:switch_view("status")
-          else
-            notify(err or "Unable to revert", vim.log.levels.ERROR)
-          end
-        end)
+        SessionCommands.settle_operation(self, ok, err, {
+          stopped = function()
+            return "revert stopped for conflict resolution"
+          end,
+          failed = "Unable to revert",
+        })
       end)
     end
   )
@@ -128,7 +119,7 @@ function M.reset(self)
           mutate.reset(self.root, mode.mode, revision, settler(self))
         end
         if mode.destructive then
-          if not SessionCommands.worktree_has_no_unsaved_buffers(self) then
+          if not SessionCommands.worktree_is_safe(self) then
             return
           end
           Menu.confirm(
@@ -192,22 +183,12 @@ local function open_rebase_editor(self, base, label)
       steps = steps,
       on_submit = function(plan)
         sequencer_backend.rebase_with_todo(self.root, base, plan, function(ok, rebase_err)
-          SessionCommands.reload_buffers()
-          if ok then
-            self:refresh()
-            return
-          end
-          sequencer_backend.detect(self.root, function(active)
-            if active then
-              notify(
-                ("%s stopped; amend or resolve, then continue"):format(active),
-                vim.log.levels.WARN
-              )
-              self:switch_view("status")
-            else
-              notify(rebase_err or "Unable to rebase", vim.log.levels.ERROR)
-            end
-          end)
+          SessionCommands.settle_operation(self, ok, rebase_err, {
+            stopped = function(active)
+              return ("%s stopped; amend or resolve, then continue"):format(active)
+            end,
+            failed = "Unable to rebase",
+          })
         end)
       end,
       on_close = function()
