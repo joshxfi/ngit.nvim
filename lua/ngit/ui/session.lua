@@ -326,6 +326,8 @@ function Session:install_autocommands()
     callback = function()
       if not self.closed and vim.api.nvim_get_current_tabpage() == self.tab then
         self:set_statusline_hidden(true)
+        -- Catches up on a resize that happened while another tab was showing.
+        self:fit_preview()
       end
     end,
   })
@@ -394,13 +396,23 @@ function Session:install_autocommands()
     callback = function()
       if not self.closed then
         self.dashboard:resize()
-        if self.current_diff_models then
-          self:render_diff_layout(
-            self.diff_layout_override or self.dashboard:desired_preview_layout()
-          )
+        if vim.api.nvim_get_current_tabpage() == self.tab then
+          self:fit_preview()
         end
         self:update_actions()
       end
+    end,
+  })
+
+  -- VimResized only covers the terminal changing size. Resizing ngit's own
+  -- windows (`<C-w><`, `<C-w>=`, a dragged separator, another split in the
+  -- tab) changes the preview width just as much. The header spans the whole
+  -- preview column, so it is in the list exactly when that width changed; a
+  -- drag between the two diff columns is left alone.
+  vim.api.nvim_create_autocmd("WinResized", {
+    group = self.augroup,
+    callback = function()
+      self:windows_resized(vim.v.event.windows or {})
     end,
   })
 
@@ -971,16 +983,111 @@ function Session:render_preview(entry, diff)
   end
   self.current_diff_models = models
   self.current_diff_opts = opts
-  local layout = self.diff_layout_override or self.dashboard:desired_preview_layout()
-  self:render_diff_layout(layout)
+  self:render_diff_layout(self:target_diff_layout())
   self.preview_win = self.dashboard.preview.window
   self.preview_buf = self.dashboard.preview.buffer
 end
 
-function Session:render_diff_layout(layout)
+--- The layout the preview should show now: a `dv` choice while it stands,
+--- otherwise what the configuration picks for the current width.
+---
+--- A `dv` choice answers the width it was made at. Once the width crosses the
+--- threshold the configuration would decide differently, the reason for the
+--- choice is gone, so it lapses and the width decides again.
+---@return "side_by_side"|"unified"
+function Session:target_diff_layout()
+  local preferred = self.dashboard:desired_preview_layout()
+  local override = self.diff_layout_override
+  if override and override.basis ~= preferred then
+    self.diff_layout_override = nil
+    override = nil
+  end
+  return override and override.layout or preferred
+end
+
+--- Right-aligned header label naming the layout and what chose it, led by the
+--- key that switches it, so the toggle is discoverable from the diff itself.
+---@return table[]
+function Session:layout_label(layout)
+  local text = layout == "side_by_side" and "side-by-side" or "unified"
+  if self.diff_layout_override then
+    text = text .. " · manual"
+  elseif self.config.diff_layout == "auto" then
+    text = text .. " · auto"
+  elseif self.config.diff_layout == "side_by_side" and layout == "unified" then
+    text = text .. " · too narrow"
+  end
+  local chunks = {}
+  local key = self.config.mappings.toggle_diff
+  if key then
+    chunks[#chunks + 1] = { key .. " ", "NgitActionKey" }
+  end
+  chunks[#chunks + 1] = { text, "NgitMuted" }
+  return chunks
+end
+
+--- Where the reader is in the diff on show: the row, how far it sits below the
+--- top of the window, and which side of a side-by-side view it is on.
+---@return table?
+function Session:capture_preview_view()
+  local preview = self.dashboard.preview
+  if not self.current_diff_models or preview.models ~= self.current_diff_models then
+    return nil
+  end
+  local window, side
+  if preview.layout == "unified" then
+    window = preview.unified.window
+  elseif vim.api.nvim_get_current_win() == preview.left.window then
+    window, side = preview.left.window, "left"
+  else
+    window, side = preview.right.window, "right"
+  end
+  if not valid_window(window) then
+    return nil
+  end
+  local view = vim.api.nvim_win_call(window, vim.fn.winsaveview)
+  return {
+    layout = preview.layout,
+    row = view.lnum,
+    offset = view.lnum - view.topline,
+    side = side,
+  }
+end
+
+--- Row in `layout` that shows the same line of the diff as `view`.
+---@return integer
+function Session:translate_preview_row(view, layout)
+  local unified = self.current_diff_models.unified
+  if view.layout == layout or not unified then
+    return view.row
+  end
+  if layout == "side_by_side" then
+    return unified.split_rows[view.row] or 1
+  end
+  local row = unified.split_first[view.row]
+  if not row then
+    return 1
+  end
+  -- A changed row becomes a "-" line followed by a "+" line. Only a reader on
+  -- the old side meant the "-" one.
+  if
+    view.side ~= "left"
+    and unified.split_rows[row + 1] == view.row
+    and unified.unified.source_kinds[row + 1] == "add"
+  then
+    row = row + 1
+  end
+  return row
+end
+
+---@param layout "side_by_side"|"unified"
+---@param keep_view boolean? keep the cursor on the line being read; only
+---  meaningful when the diff on show is re-rendered, not a new one
+function Session:render_diff_layout(layout, keep_view)
   if not self.current_diff or not self.current_diff_models then
     return
   end
+  local view = keep_view and self:capture_preview_view() or nil
   if layout == "side_by_side" and not self.dashboard:supports_side_by_side() then
     layout = "unified"
     self.diff_layout_override = nil
@@ -989,14 +1096,62 @@ function Session:render_diff_layout(layout)
     self.current_diff_models.unified =
       DiffView.unified(self.current_diff, self.current_diff_opts, self.current_diff_models.split)
   end
+  local cursor = view and { row = self:translate_preview_row(view, layout), offset = view.offset }
   local rendered_layout = self.dashboard:render_diff(
     self.current_diff_models,
     layout,
-    DiffView.filetype(self.current_diff)
+    DiffView.filetype(self.current_diff),
+    { label = self:layout_label(layout), cursor = cursor }
   )
   self.preview_win = self.dashboard.preview.window
   self.preview_buf = self.dashboard.preview.buffer
   return rendered_layout
+end
+
+---@param windows integer[] the windows WinResized reports as resized
+function Session:windows_resized(windows)
+  if self.closed or vim.api.nvim_get_current_tabpage() ~= self.tab then
+    return
+  end
+  local header = self.dashboard.preview.header.window
+  for _, window in ipairs(windows) do
+    if window == header then
+      self:fit_preview()
+      return
+    end
+  end
+end
+
+--- Brings the preview in line with its current width: switches layout when
+--- the width crossed the threshold, rebalances the two diff columns and refits
+--- the header when the column they share changed size, and otherwise does
+--- nothing. ngit's own window sizing fires WinResized too, and those passes
+--- must not touch the cursor or the windows.
+function Session:fit_preview()
+  if self.closed or not self.dashboard then
+    return
+  end
+  local dashboard = self.dashboard
+  local width = dashboard:preview_width()
+  local layout = self:target_diff_layout()
+  local showing_diff = self.current_diff_models ~= nil
+    and dashboard.preview.models == self.current_diff_models
+  if layout ~= dashboard.preview.layout then
+    if showing_diff then
+      self:render_diff_layout(layout, true)
+    else
+      -- A loading or error message is on show; re-rendering the last diff
+      -- would paint over it.
+      dashboard:set_preview_layout(layout)
+      dashboard:render_preview_header()
+      self.preview_win = dashboard.preview.window
+      self.preview_buf = dashboard.preview.buffer
+    end
+  elseif width ~= self.fitted_width then
+    dashboard:balance_diff_columns()
+    dashboard:render_preview_header(nil, showing_diff and self:layout_label(layout) or false)
+  end
+  self.fitted_width = width
 end
 
 --- Whether the cursor is in one of the diff panes, whatever they are showing.
@@ -1299,11 +1454,14 @@ function Session:toggle_diff_layout()
   if requested == "side_by_side" and not self.dashboard:supports_side_by_side() then
     self.diff_layout_override = nil
     notify("Side-by-side diff needs at least 40 preview columns", vim.log.levels.WARN)
-    self:render_diff_layout("unified")
+    self:render_diff_layout("unified", true)
     return
   end
-  self.diff_layout_override = requested
-  self:render_diff_layout(requested)
+  local preferred = self.dashboard:desired_preview_layout()
+  -- Toggling back to what the width picks anyway hands the choice back to it.
+  self.diff_layout_override = requested ~= preferred and { layout = requested, basis = preferred }
+    or nil
+  self:render_diff_layout(requested, true)
 end
 
 Session.after_mutation = SessionCommands.after_mutation

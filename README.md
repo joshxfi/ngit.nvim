@@ -197,7 +197,7 @@ require("ngit").setup({
   max_cache_bytes = 32 * 1024 * 1024,
   commit_limit = 150,
   diff_layout = "auto",
-  side_by_side_min_width = 80,
+  side_by_side_min_width = 130,
   file_panel_width = 0.32,
   hide_statusline = true,
   auto_refresh = true,
@@ -211,7 +211,12 @@ require("ngit").setup({
 
 `diff_layout` accepts `"auto"`, `"side_by_side"`, or `"unified"`. Auto uses
 aligned old/new panes once the preview reaches `side_by_side_min_width` columns
-and switches to unified below that. Diff colors are derived from your theme and
+(about 60 columns of code per side) and switches to unified below that. It
+follows the preview as it changes size, whether the terminal is resized or
+ngit's own windows are, and keeps the cursor on the line you were reading. The
+preview header names the current layout and what chose it. `dv` overrides the
+choice until the preview crosses the threshold again, then auto takes over.
+Diff colors are derived from your theme and
 recomputed after `:colorscheme`; see `:help ngit-highlights` to override them.
 
 ## Commands

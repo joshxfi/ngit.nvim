@@ -2459,6 +2459,191 @@ test("toggling the diff layout preserves the weighted panel heights", function()
   require("ngit").close()
 end)
 
+test("unified rows trace back to the side-by-side row they came from", function()
+  local patch = table.concat({
+    "diff --git a/example.lua b/example.lua",
+    "index 1111111..2222222 100644",
+    "--- a/example.lua",
+    "+++ b/example.lua",
+    "@@ -1,3 +1,4 @@",
+    " local before = true",
+    "-local value = 'old'",
+    "+local value = 'new'",
+    "+local added = true",
+    " return value",
+    "",
+  }, "\n")
+  local view = require("ngit.ui.diff_view")
+  local diff = require("ngit.git.diff").parse(patch, 10000)
+  local split = view.split(diff, { title = "example" })
+  local unified = view.unified(diff, { title = "example" }, split)
+  for row, split_row in ipairs(unified.split_rows) do
+    local first = unified.split_first[split_row]
+    truthy(first <= row, "a unified row precedes the first row of its source")
+  end
+  -- The changed row is one side-by-side row but two unified ones.
+  local changed
+  for row, line in ipairs(split.right.lines) do
+    if line == "local value = 'new'" then
+      changed = row
+    end
+  end
+  local first = unified.split_first[changed]
+  equal("- local value = 'old'", unified.unified.lines[first])
+  equal("+ local value = 'new'", unified.unified.lines[first + 1])
+  equal(changed, unified.split_rows[first + 1])
+end)
+
+--- Opens a session on a wide editor so the preview starts side by side, and
+--- restores the editor size however the callback ends.
+local function with_wide_session(callback)
+  local previous_columns = vim.o.columns
+  local root = repository()
+  local lines = {}
+  for index = 1, 60 do
+    lines[index] = "line " .. index
+  end
+  write_file(vim.fs.joinpath(root, "a.txt"), table.concat(lines, "\n") .. "\n")
+  git(root, { "add", "-A" })
+  git(root, { "commit", "-qm", "init" })
+  lines[20] = "changed 20"
+  lines[40] = "changed 40"
+  write_file(vim.fs.joinpath(root, "a.txt"), table.concat(lines, "\n") .. "\n")
+
+  vim.o.columns = 200
+  require("ngit").setup()
+  local ok, err = pcall(function()
+    require("ngit").open({ cwd = root })
+    truthy(vim.wait(10000, function()
+      local session = require("ngit")._active_session()
+      return session and session.status and session.current_diff_models ~= nil
+    end, 10))
+    callback(require("ngit")._active_session())
+  end)
+  require("ngit").close()
+  vim.o.columns = previous_columns
+  if not ok then
+    error(err, 0)
+  end
+end
+
+local function header_text(session)
+  return table.concat(
+    vim.api.nvim_buf_get_lines(session.dashboard.preview.header.buffer, 0, -1, false),
+    "\n"
+  )
+end
+
+--- Resizes the sidebar the way a dragged separator would, then delivers the
+--- WinResized notification headless Neovim never raises on its own.
+local function drag_sidebar(session, width)
+  session.dashboard:set_sidebar_width(width)
+  session:windows_resized({ session.dashboard.preview.header.window })
+end
+
+test("the preview switches layout when ngit's own windows are resized", function()
+  with_wide_session(function(session)
+    local dashboard = session.dashboard
+    equal("side_by_side", dashboard.preview.layout)
+    truthy(header_text(session):find("dv side-by-side · auto", 1, true), header_text(session))
+
+    drag_sidebar(session, 110)
+    equal("unified", dashboard.preview.layout)
+    -- The switch keeps the drag instead of snapping the sidebar back, which
+    -- would widen the preview and switch straight back.
+    equal(110, vim.api.nvim_win_get_width(dashboard.panels.status.window))
+    truthy(header_text(session):find("dv unified · auto", 1, true), header_text(session))
+
+    drag_sidebar(session, 64)
+    equal("side_by_side", dashboard.preview.layout)
+    local left = vim.api.nvim_win_get_width(dashboard.preview.left.window)
+    local right = vim.api.nvim_win_get_width(dashboard.preview.right.window)
+    truthy(math.abs(left - right) <= 1, ("diff columns unbalanced: %d / %d"):format(left, right))
+
+    -- A resize event for a window outside the preview column changes nothing.
+    session:windows_resized({ dashboard.panels.branches.window })
+    equal("side_by_side", dashboard.preview.layout)
+
+    -- A loading message on show is not painted over by the previous diff.
+    dashboard:render_preview({ "", "  Loading a.txt…" }, "Loading")
+    drag_sidebar(session, 110)
+    equal("unified", dashboard.preview.layout)
+    equal(
+      "  Loading a.txt…",
+      vim.api.nvim_buf_get_lines(dashboard.preview.unified.buffer, 1, 2, false)[1]
+    )
+  end)
+end)
+
+test("a dv choice holds until the preview width crosses the threshold", function()
+  with_wide_session(function(session)
+    local dashboard = session.dashboard
+    session:toggle_diff_layout()
+    equal("unified", dashboard.preview.layout)
+    truthy(header_text(session):find("unified · manual", 1, true), header_text(session))
+
+    -- Resizing on the same side of the threshold keeps the choice.
+    drag_sidebar(session, 66)
+    equal("unified", dashboard.preview.layout)
+    truthy(session.diff_layout_override)
+
+    -- Crossing it retires the choice; the width decides from then on.
+    drag_sidebar(session, 110)
+    equal(nil, session.diff_layout_override)
+    truthy(header_text(session):find("unified · auto", 1, true), header_text(session))
+    drag_sidebar(session, 64)
+    equal("side_by_side", dashboard.preview.layout)
+
+    -- Toggling back to what the width picks hands the choice back to it.
+    session:toggle_diff_layout()
+    truthy(session.diff_layout_override)
+    session:toggle_diff_layout()
+    equal("side_by_side", dashboard.preview.layout)
+    equal(nil, session.diff_layout_override)
+  end)
+end)
+
+test("switching layouts keeps the cursor on the line being read", function()
+  with_wide_session(function(session)
+    local preview = session.dashboard.preview
+    local split = session.current_diff_models.split
+    local changed
+    for row, line in ipairs(split.right.lines) do
+      if line == "changed 40" then
+        changed = row
+      end
+    end
+    truthy(changed, "the second change is missing from the split model")
+
+    vim.api.nvim_set_current_win(preview.right.window)
+    vim.api.nvim_win_set_cursor(preview.right.window, { changed, 0 })
+    session:toggle_diff_layout()
+    local row = vim.api.nvim_win_get_cursor(preview.unified.window)[1]
+    equal(
+      "+ changed 40",
+      vim.api.nvim_buf_get_lines(preview.unified.buffer, row - 1, row, false)[1]
+    )
+
+    session:toggle_diff_layout()
+    equal(changed, vim.api.nvim_win_get_cursor(preview.right.window)[1])
+    equal(changed, vim.api.nvim_win_get_cursor(preview.left.window)[1])
+
+    -- From the old side, the same row lands on the removed line.
+    vim.api.nvim_set_current_win(preview.left.window)
+    vim.api.nvim_win_set_cursor(preview.left.window, { changed, 0 })
+    session:toggle_diff_layout()
+    row = vim.api.nvim_win_get_cursor(preview.unified.window)[1]
+    equal("- line 40", vim.api.nvim_buf_get_lines(preview.unified.buffer, row - 1, row, false)[1])
+    session:toggle_diff_layout()
+
+    -- A resize that keeps the layout leaves the cursor alone.
+    vim.api.nvim_win_set_cursor(preview.right.window, { changed, 0 })
+    drag_sidebar(session, 66)
+    equal("side_by_side", preview.layout)
+    equal(changed, vim.api.nvim_win_get_cursor(preview.right.window)[1])
+  end)
+end)
+
 test("commit previews carry the message and stat into the scrollable body", function()
   local root = repository()
   write_file(vim.fs.joinpath(root, "a.txt"), "one\n")

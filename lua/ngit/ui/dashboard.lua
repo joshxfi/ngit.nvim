@@ -109,6 +109,25 @@ local function configure_preview(window, config)
   configure_ngit_window(window, config)
 end
 
+--- Narrowest preview that can hold two diff columns at all, whatever the
+--- configuration asks for.
+local side_by_side_floor = 40
+
+--- The layout a preview of this width should use before any `dv` choice. It is
+--- decided by width alone, never by the diff on show, so moving between files
+--- does not flip the layout underneath the reader.
+---@param config NgitConfig
+---@param width integer
+---@return "side_by_side"|"unified"
+local function preferred_layout(config, width)
+  if config.diff_layout == "unified" or width < side_by_side_floor then
+    return "unified"
+  elseif config.diff_layout == "side_by_side" then
+    return "side_by_side"
+  end
+  return width >= config.side_by_side_min_width and "side_by_side" or "unified"
+end
+
 ---@param session_id integer
 ---@param config NgitConfig
 function Dashboard.open(session_id, config)
@@ -173,13 +192,7 @@ function Dashboard.open(session_id, config)
     scratch_buffer(("ngit://%d/diff-unified"):format(session_id), "ngit-diff")
   vim.bo[preview_unified_buffer].bufhidden = "hide"
 
-  local preview_width = vim.api.nvim_win_get_width(preview_header_window)
-  local initial_layout = config.diff_layout
-  if initial_layout == "auto" then
-    initial_layout = preview_width >= config.side_by_side_min_width and "side_by_side" or "unified"
-  elseif initial_layout == "side_by_side" and preview_width < 40 then
-    initial_layout = "unified"
-  end
+  local initial_layout = preferred_layout(config, vim.api.nvim_win_get_width(preview_header_window))
 
   local preview_left_window
   local preview_right_window
@@ -263,7 +276,10 @@ function Dashboard:resize_sidebar()
   local columns = vim.o.columns
   local configured = self.config.file_panel_width
   local width = configured < 1 and math.floor(columns * configured) or math.floor(configured)
-  width = math.max(28, math.min(width, math.max(28, columns - 40)))
+  self:set_sidebar_width(math.max(28, math.min(width, math.max(28, columns - 40))))
+end
+
+function Dashboard:set_sidebar_width(width)
   for _, id in ipairs(panel_order) do
     local panel = self.panels[id]
     if valid_window(panel.window) then
@@ -342,7 +358,7 @@ function Dashboard:render_preview(lines, title, opts)
   opts = opts or {}
   self.preview.models = nil
   self.preview.filetype = nil
-  set_lines(self.preview.header.buffer, { title .. (opts.truncated and " · truncated" or "") })
+  self:render_preview_header({ title .. (opts.truncated and " · truncated" or "") })
   for _, target in ipairs({
     self.preview.left,
     self.preview.right,
@@ -355,9 +371,6 @@ function Dashboard:render_preview(lines, title, opts)
       pcall(vim.treesitter.stop, target.buffer)
     end
     set_filetype(target.buffer, "ngit-diff")
-  end
-  if valid_window(self.preview.header.window) then
-    pcall(vim.api.nvim_win_set_height, self.preview.header.window, 1)
   end
   for _, item in ipairs(self:preview_windows()) do
     if opts.reset_cursor ~= false and valid_window(item.window) then
@@ -408,17 +421,78 @@ function Dashboard:preview_width()
 end
 
 function Dashboard:supports_side_by_side()
-  return self:preview_width() >= 40
+  return self:preview_width() >= side_by_side_floor
 end
 
 function Dashboard:desired_preview_layout()
-  local width = self:preview_width()
-  if self.config.diff_layout == "side_by_side" then
-    return self:supports_side_by_side() and "side_by_side" or "unified"
-  elseif self.config.diff_layout == "unified" then
-    return "unified"
+  return preferred_layout(self.config, self:preview_width())
+end
+
+--- Splits the preview width evenly between the two diff columns.
+function Dashboard:balance_diff_columns()
+  local left, right = self.preview.left.window, self.preview.right.window
+  if self.preview.layout ~= "side_by_side" or not valid_window(left) or not valid_window(right) then
+    return
   end
-  return width >= self.config.side_by_side_min_width and "side_by_side" or "unified"
+  local total = vim.api.nvim_win_get_width(left) + vim.api.nvim_win_get_width(right) + 1
+  local target = math.floor((total - 1) / 2)
+  if vim.api.nvim_win_get_width(left) ~= target then
+    pcall(vim.api.nvim_win_set_width, left, target)
+  end
+end
+
+--- Header lines fitted to the preview width. The layout label is right-aligned
+--- on the last line, the short diffstat row, and is left out rather than
+--- overlapping it when the preview is too narrow for both.
+---@param lines string[]? header text; nil re-fits the lines last drawn
+---@param label table[]? `{ text, group }` chunks; nil keeps the last label
+function Dashboard:render_preview_header(lines, label)
+  local header = self.preview.header
+  if lines then
+    header.lines = lines
+    header.label = nil
+  end
+  if label ~= nil then
+    header.label = label ~= false and label or nil
+  end
+  local width = self:preview_width()
+  local rendered = {}
+  for index, line in ipairs(header.lines or { "" }) do
+    rendered[index] = truncate(line, math.max(1, width - 1))
+  end
+  local spans = {}
+  if header.label and #header.label > 0 then
+    local text = ""
+    for _, chunk in ipairs(header.label) do
+      text = text .. chunk[1]
+    end
+    local last = rendered[#rendered]
+    local gap = width - 1 - vim.fn.strdisplaywidth(last) - vim.fn.strdisplaywidth(text)
+    if gap >= 2 then
+      local col = #last + gap
+      rendered[#rendered] = last .. string.rep(" ", gap) .. text
+      for _, chunk in ipairs(header.label) do
+        spans[#spans + 1] = { col = col, end_col = col + #chunk[1], group = chunk[2] }
+        col = col + #chunk[1]
+      end
+    end
+  end
+  set_lines(header.buffer, rendered)
+  if valid_buffer(header.buffer) then
+    vim.api.nvim_buf_clear_namespace(header.buffer, self.namespace, 0, -1)
+    for _, span in ipairs(spans) do
+      vim.api.nvim_buf_set_extmark(header.buffer, self.namespace, #rendered - 1, span.col, {
+        end_col = span.end_col,
+        hl_group = span.group,
+      })
+    end
+  end
+  if valid_window(header.window) then
+    local height = math.max(1, #rendered)
+    if vim.api.nvim_win_get_height(header.window) ~= height then
+      pcall(vim.api.nvim_win_set_height, header.window, height)
+    end
+  end
 end
 
 function Dashboard:set_preview_layout(layout)
@@ -429,6 +503,10 @@ function Dashboard:set_preview_layout(layout)
     return layout
   end
   local origin = vim.api.nvim_get_current_win()
+  local status = self.panels.status
+  local sidebar = status
+    and valid_window(status.window)
+    and vim.api.nvim_win_get_width(status.window)
   if layout == "unified" then
     if valid_window(self.preview.left.window) then
       pcall(vim.api.nvim_win_hide, self.preview.left.window)
@@ -441,7 +519,6 @@ function Dashboard:set_preview_layout(layout)
     self.preview.buffer = self.preview.unified.buffer
   else
     local body = self.preview.unified.window or self.preview.right.window
-    local total = vim.api.nvim_win_get_width(body)
     self.preview.right.window = body
     vim.api.nvim_win_set_buf(body, self.preview.right.buffer)
     configure_preview(body, self.config)
@@ -453,35 +530,45 @@ function Dashboard:set_preview_layout(layout)
     self.preview.unified.window = nil
     self.preview.window = self.preview.right.window
     self.preview.buffer = self.preview.right.buffer
-    -- Balance only the two diff columns. `wincmd =` would reach the whole tab
-    -- and flatten the weighted panel heights on the left.
-    pcall(vim.api.nvim_win_set_width, self.preview.left.window, math.floor((total - 1) / 2))
   end
   self.preview.layout = layout
+  -- Balance only the two diff columns. `wincmd =` would reach the whole tab
+  -- and flatten the weighted panel heights on the left.
+  self:balance_diff_columns()
   if valid_window(origin) then
     vim.api.nvim_set_current_win(origin)
   end
-  self:resize_sidebar()
+  -- The sidebar keeps the width it had, not the configured one: a switch made
+  -- because the user dragged the sidebar wider must not undo that drag, or
+  -- the preview would widen again and switch straight back.
+  if sidebar then
+    self:set_sidebar_width(sidebar)
+  end
   self:reflow()
   return layout
 end
 
-function Dashboard:render_diff(models, layout, filetype)
+--- Puts the cursor on `row` and keeps it `offset` rows below the top of the
+--- window, so a re-render leaves the line being read where it was on screen.
+local function place_cursor(window, row, offset)
+  if not valid_window(window) then
+    return
+  end
+  local count = vim.api.nvim_buf_line_count(vim.api.nvim_win_get_buf(window))
+  row = math.max(1, math.min(row, count))
+  local topline = math.max(1, row - math.max(0, offset or 0))
+  vim.api.nvim_win_call(window, function()
+    vim.fn.winrestview({ lnum = row, col = 0, topline = topline })
+  end)
+end
+
+---@param opts? { label?: table[], cursor?: { row: integer, offset: integer } }
+function Dashboard:render_diff(models, layout, filetype, opts)
+  opts = opts or {}
   layout = layout or self:desired_preview_layout()
   layout = self:set_preview_layout(layout)
   local active = layout == "side_by_side" and models.split or models.unified
-  local header = active and active.header or { "Diff" }
-  local width = valid_window(self.preview.header.window)
-      and vim.api.nvim_win_get_width(self.preview.header.window)
-    or vim.o.columns
-  local header_lines = {}
-  for _, line in ipairs(header) do
-    header_lines[#header_lines + 1] = truncate(line, math.max(1, width - 1))
-  end
-  set_lines(self.preview.header.buffer, header_lines)
-  if valid_window(self.preview.header.window) then
-    pcall(vim.api.nvim_win_set_height, self.preview.header.window, math.max(1, #header_lines))
-  end
+  self:render_preview_header(active and active.header or { "Diff" }, opts.label or false)
   pcall(vim.api.nvim_win_set_height, self.actions.window, 1)
   if layout == "side_by_side" then
     -- Both panes share a gutter width so their rows stay lined up.
@@ -493,11 +580,13 @@ function Dashboard:render_diff(models, layout, filetype)
   end
   self.preview.models = models
   self.preview.filetype = filetype
+  local row = opts.cursor and opts.cursor.row or 1
+  local offset = opts.cursor and opts.cursor.offset or 0
   if layout == "side_by_side" then
-    pcall(vim.api.nvim_win_set_cursor, self.preview.left.window, { 1, 0 })
-    pcall(vim.api.nvim_win_set_cursor, self.preview.right.window, { 1, 0 })
+    place_cursor(self.preview.left.window, row, offset)
+    place_cursor(self.preview.right.window, row, offset)
   else
-    pcall(vim.api.nvim_win_set_cursor, self.preview.unified.window, { 1, 0 })
+    place_cursor(self.preview.unified.window, row, offset)
   end
   return layout
 end
