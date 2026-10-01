@@ -287,7 +287,9 @@ context
         adjust it for the open view without changing this default.
 
 debounce_ms
-        Delay before loading a newly selected file diff.
+        Minimum time between two preview loads. A single step loads its diff
+        at once; only steps that follow a load closely, as when a key is held,
+        wait this long for the selection to settle.
 
 refresh_debounce_ms
         Delay used to coalesce automatic repository refreshes.
@@ -433,11 +435,19 @@ place. Splitting a whole-file addition or deletion is refused outright, since
 reversing a creation rewrites the whole file rather than a range inside it.
 
 Changes, branches, commits, and stashes load independently and asynchronously.
-Only the active panel's selected file, commit, branch, or stash preview is
-loaded. Changing panel focus does not reload collection data. Commit history is
-paginated. Rapid selection changes are debounced, superseded jobs are
-terminated, and recent previews are stored in a cache bounded by both entry
-count and estimated bytes. Oversized previews are displayed without caching.
+Changing panel focus does not reload collection data. Commit history is
+paginated. Once the selected preview is on screen, ngit loads the previews on
+either side of it in the background, one at a time and only up to 128 KiB each,
+so the next step usually finds its diff cached. Loads closer together than
+`debounce_ms` are spaced out, superseded jobs are terminated, and recent
+previews are stored in a cache bounded by both entry count and estimated bytes.
+Oversized previews are displayed without caching.
+
+The previous diff stays on screen until its replacement is ready, and a
+loading message appears only when a load takes longer than about 150 ms. A
+refresh after staging, committing, or returning to the editor likewise keeps
+every loaded panel's rows until the new list arrives, and starts the selected
+entry's diff alongside the refresh instead of after it.
 Each raw patch is parsed once into a semantic presentation model, and the last
 few models are retained so moving back over a file redraws without rebuilding
 them. Toggling between split and unified presentation does not run another Git

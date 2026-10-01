@@ -164,6 +164,33 @@ end)
 benchmark("preview render (4,000-line patch, side by side)", 5, 1, function()
   dashboard:render_diff(patch_models, "side_by_side", nil)
 end)
+
+-- Moving between two files of the same language with syntax highlighting on,
+-- which is what most steps through a file list are. The 4,000-line patch above
+-- is past the size where highlighting switches off, so it cannot show this.
+local lua_records = {
+  "diff --git a/small.lua b/small.lua",
+  "index 1111111..2222222 100644",
+  "--- a/small.lua",
+  "+++ b/small.lua",
+  "@@ -1,400 +1,400 @@",
+}
+for index = 1, 400 do
+  if index % 10 == 0 then
+    lua_records[#lua_records + 1] = ("-local value_%04d = compute(%d)"):format(index, index)
+    lua_records[#lua_records + 1] = ("+local value_%04d = compute(%d) + 1"):format(index, index)
+  else
+    lua_records[#lua_records + 1] = (" local value_%04d = compute(%d)"):format(index, index)
+  end
+end
+lua_records[#lua_records + 1] = ""
+local lua_patch = table.concat(lua_records, "\n")
+local parsed_lua = diff.parse(lua_patch, #lua_patch + 1)
+local lua_split = diff_view.split(parsed_lua, { title = "small.lua" })
+local lua_models = { split = lua_split }
+benchmark("preview render (400-line Lua patch, highlighted, side by side)", 10, 2, function()
+  dashboard:render_diff(lua_models, "side_by_side", "lua")
+end)
 dashboard:dispose()
 
 vim.cmd("qa!")

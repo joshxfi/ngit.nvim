@@ -272,11 +272,19 @@ prints on standard output. See `:help ngit-safety`.
 
 ## Performance
 
-The four panels load independently in the background, and ngit fetches a patch
-only for the selected entry. It waits for rapid selection changes to settle,
-stops jobs that a newer selection replaced, and caches previews within both
-`cache_entries` and `max_cache_bytes`. Line numbers are drawn through
-`'statuscolumn'`, so rows that never reach the screen cost nothing.
+The four panels load independently in the background. Once the selected diff is
+on screen, ngit loads the entries on either side of it, one at a time and up to
+128 KiB each, so the next step usually finds its diff in the cache. A single
+step that misses the cache loads at once. Steps closer together than
+`debounce_ms`, as when a key is held, wait for the selection to settle. ngit
+stops jobs that a newer selection replaced and caches previews within both
+`cache_entries` and `max_cache_bytes`.
+
+The previous diff stays on screen until the next one is ready, and a loading
+message appears only when a load takes longer than about 150 ms. A refresh
+after staging, committing, or returning to the editor keeps each panel's rows
+until the new list arrives. Line numbers are drawn through `'statuscolumn'`, so
+rows that never reach the screen cost nothing.
 
 `make benchmark` runs a repeatable microbenchmark on generated fixtures. It
 runs each workload a few times to warm up, then reports the median of seven
@@ -284,18 +292,20 @@ timed runs. On an Apple M4 with 24 GB RAM and Neovim 0.12.4:
 
 | Workload                     |                    Fixture |  Median |
 | ---------------------------- | -------------------------: | ------: |
-| Porcelain-v2 status parser   |               10,000 files |  6.9 ms |
-| Commit parser                |             10,000 commits | 19.3 ms |
-| Branch parser                |                10,000 refs | 14.5 ms |
-| Diff presentation            | 4 KiB near-identical lines | 0.39 ms |
-| Diff presentation            |           4,000-line patch | 17.0 ms |
+| Porcelain-v2 status parser   |               10,000 files |  6.1 ms |
+| Commit parser                |             10,000 commits | 16.7 ms |
+| Branch parser                |                10,000 refs | 11.6 ms |
+| Diff presentation            | 4 KiB near-identical lines | 0.13 ms |
+| Diff presentation            |           4,000-line patch |  7.0 ms |
 | Preview render, unified      |           4,000-line patch |  4.6 ms |
-| Preview render, side by side |           4,000-line patch |  5.1 ms |
+| Preview render, side by side |           4,000-line patch |  4.8 ms |
+| Preview render, highlighted  |         400-line Lua patch | 0.14 ms |
 
 The parser rows measure work inside Neovim, not Git startup or disk I/O. The
 render rows include filling the buffer, placing highlight extmarks, and drawing
 the line-number gutter, which together are the cost of every selection change.
-Use these numbers to catch regressions, not as guarantees.
+The highlighted row also runs Lua syntax highlighting, as most steps through a
+file list do, and draws the side-by-side layout. Use these numbers to catch regressions, not as guarantees.
 
 ## Development
 

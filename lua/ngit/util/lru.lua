@@ -33,6 +33,11 @@ function M:get(key)
   return value
 end
 
+--- Whether `key` is cached, without counting as a use of it.
+function M:has(key)
+  return self.values[key] ~= nil
+end
+
 function M:set(key, value)
   if self.values[key] ~= nil then
     for index, candidate in ipairs(self.order) do

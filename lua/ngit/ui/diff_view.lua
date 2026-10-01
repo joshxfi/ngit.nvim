@@ -1,7 +1,14 @@
 local M = {}
 
 local function sanitize(value)
-  local cleaned = (value or ""):gsub("\r", ""):gsub("\t", "  "):gsub("[%z\1-\8\11\12\14-\31]", "")
+  value = value or ""
+  -- Almost no line has a tab or control character, and one scan to confirm
+  -- that costs a fraction of the three rewrites below. They were over half the
+  -- time spent building a large diff's presentation.
+  if not value:find("[%z\1-\31]") then
+    return value
+  end
+  local cleaned = value:gsub("\r", ""):gsub("\t", "  "):gsub("[%z\1-\8\11\12\14-\31]", "")
   return cleaned
 end
 
@@ -91,18 +98,21 @@ local function pane()
 end
 
 local function append(target, text, number, kind, hunk, unified_row, new_number)
-  target.lines[#target.lines + 1] = sanitize(text)
-  target.source_numbers[#target.lines] = number or false
-  target.new_numbers[#target.lines] = new_number or false
-  target.source_kinds[#target.lines] = kind or false
-  target.unified_rows[#target.lines] = unified_row or false
+  -- The length operator is a search, not a field read, and this runs for
+  -- every row of every diff; it is taken once.
+  local row = #target.lines + 1
+  target.lines[row] = sanitize(text)
+  target.source_numbers[row] = number or false
+  target.new_numbers[row] = new_number or false
+  target.source_kinds[row] = kind or false
+  target.unified_rows[row] = unified_row or false
   if hunk then
-    target.row_hunks[#target.lines] = hunk
+    target.row_hunks[row] = hunk
   end
   local group = line_group(kind)
   if group then
     target.highlights[#target.highlights + 1] = {
-      row = #target.lines - 1,
+      row = row - 1,
       group = group,
       line = true,
       priority = (kind == "header" or kind == "hunk") and 80 or 50,

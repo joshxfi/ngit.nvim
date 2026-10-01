@@ -40,15 +40,29 @@ local function stop(job)
   end
 end
 
+--- Retires the diff on show. It stays on screen until the refresh delivers its
+--- replacement; the message appears only if that takes long enough to notice.
 local function clear_preview(self, message)
   self.diff_request = self.diff_request + 1
   stop(self.diff_job)
   self.diff_job = nil
+  self:cancel_prefetch()
   self.current_diff = nil
   self.current_diff_models = nil
   self.current_diff_opts = nil
   if message then
-    self.dashboard:render_preview({ "", "  " .. message }, "Changes")
+    self:notice_later(message, "Changes")
+  end
+end
+
+--- Starts the selected entry's diff alongside the refresh's own Git commands
+--- instead of after them. When the refreshed list still has that entry, the
+--- preview takes over this load rather than starting another.
+local function load_selected_early(self)
+  local panel = self:active_state()
+  local entry = panel and panel.entries[panel.selected]
+  if entry then
+    self:prefetch_entry(entry)
   end
 end
 
@@ -147,21 +161,28 @@ function M.full(self)
     preferred[id] = entry_key(panel.entries[panel.selected])
     panel.request = panel.request + 1
     panel.loading = true
-    panel.error = nil
     stop(panel.job)
     panel.job = nil
-    panel.entries = {}
-    panel.row_entries = {}
-    self.dashboard:render_panel(id, {
-      lines = { "", ("  Loading %s…"):format(id) },
-      count = 0,
-      selected = 0,
-      empty = true,
-      detail = "refreshing",
-    })
+    -- A loaded panel keeps what it shows, rows or "No entries.", until its
+    -- refreshed list replaces it. Blanking every panel to a placeholder first
+    -- made each stage, commit, and return to the editor flash the whole
+    -- dashboard for one frame.
+    if panel.data == nil or panel.error then
+      panel.entries = {}
+      panel.row_entries = {}
+      self.dashboard:render_panel(id, {
+        lines = { "", ("  Loading %s…"):format(id) },
+        count = 0,
+        selected = 0,
+        empty = true,
+        detail = "refreshing",
+      })
+    end
+    panel.error = nil
   end
   self:sync_active_aliases()
   self.operation = nil
+  load_selected_early(self)
 
   local status_panel = self.panels.status
   local status_request = status_panel.request
@@ -268,6 +289,7 @@ function M.status(self)
 
   if self.active_panel == "status" then
     clear_preview(self, "Refreshing working tree…")
+    load_selected_early(self)
   end
 
   local status_job

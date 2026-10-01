@@ -774,10 +774,20 @@ end
 
 -- Review range ----------------------------------------------------------------
 
+--- A refresh keeps a panel's rows on screen until their replacements arrive.
+--- A mode switch changes what those rows mean, so they go at once instead:
+--- until the new list arrives they would name entries of the mode just left.
+local function forget_rows(panel)
+  panel.entries = {}
+  panel.row_entries = {}
+  panel.data = nil
+end
+
 function M.set_range(self, spec)
   if not spec or spec == "" then
     self.range = nil
     self.range_files = nil
+    forget_rows(self.panels.status)
     self:refresh()
     return
   end
@@ -787,6 +797,7 @@ function M.set_range(self, spec)
       return
     end
     self.range = { spec = spec }
+    forget_rows(self.panels.status)
     self.panels.status.filter = nil
     self.panels.status.selected = 1
     self:focus_panel("status")
@@ -862,6 +873,7 @@ end
 function M.set_history(self, path)
   local panel = self.panels.commits
   self.history = path and { path = path, follow = true } or nil
+  forget_rows(panel)
   panel.filter = nil
   panel.selected = 1
   self:focus_panel("commits")
