@@ -237,6 +237,11 @@ function M.unified(diff, opts, split)
   split = split or M.split(diff, opts)
   local unified = pane()
   local unified_hunks = {}
+  -- Side-by-side row behind each unified row, and the first unified row each
+  -- side-by-side row became. Switching layouts keeps the cursor on the line
+  -- being read by translating through these rather than resetting to the top.
+  local split_rows = {}
+  local split_first = {}
   local last_hunk
   local file_rows = {}
   local left_line_groups = {}
@@ -274,6 +279,7 @@ function M.unified(diff, opts, split)
     end
   end
   for row = 1, #split.left.lines do
+    local emitted = #unified.lines
     local left = split.left.lines[row]
     local right = split.right.lines[row]
     local left_number = split.left.source_numbers[row]
@@ -317,6 +323,10 @@ function M.unified(diff, opts, split)
         right_number
       )
     end
+    split_first[row] = emitted + 1
+    for index = emitted + 1, #unified.lines do
+      split_rows[index] = row
+    end
   end
 
   -- Files appear in the same order in both layouts and each contributes exactly
@@ -335,6 +345,8 @@ function M.unified(diff, opts, split)
     files = unified.file_rows,
     file_spans = file_spans,
     hunks = unified_hunks,
+    split_rows = split_rows,
+    split_first = split_first,
   }
 end
 
