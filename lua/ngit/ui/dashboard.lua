@@ -370,6 +370,7 @@ function Dashboard:render_preview(lines, title, opts)
     if vim.treesitter and vim.treesitter.stop then
       pcall(vim.treesitter.stop, target.buffer)
     end
+    target.highlight = nil
     set_filetype(target.buffer, "ngit-diff")
   end
   for _, item in ipairs(self:preview_windows()) do
@@ -389,11 +390,24 @@ local function render_source(self, target, model, filetype, shared_digits)
   vim.api.nvim_buf_clear_namespace(target.buffer, self.namespace, 0, -1)
   Gutter.attach(target.buffer, model, shared_digits)
   set_filetype(target.buffer, filetype or "ngit-diff")
-  if vim.treesitter and vim.treesitter.stop then
-    pcall(vim.treesitter.stop, target.buffer)
-  end
-  if filetype and #lines <= max_treesitter_lines and vim.treesitter and vim.treesitter.start then
-    pcall(vim.treesitter.start, target.buffer, filetype)
+  local highlight = filetype and #lines <= max_treesitter_lines and filetype or nil
+  -- A highlighter already running for this language follows the new lines on
+  -- its own, as it would any edit. Stopping it re-fires the buffer's FileType
+  -- autocommands and starting one parses from scratch, which together were
+  -- most of the cost of moving between two files of the same language.
+  local active = vim.treesitter
+    and vim.treesitter.highlighter
+    and vim.treesitter.highlighter.active[target.buffer]
+  if not (highlight and active and target.highlight == highlight) then
+    if vim.treesitter and vim.treesitter.stop then
+      pcall(vim.treesitter.stop, target.buffer)
+    end
+    target.highlight = nil
+    if highlight and vim.treesitter and vim.treesitter.start then
+      if pcall(vim.treesitter.start, target.buffer, highlight) then
+        target.highlight = highlight
+      end
+    end
   end
   local set_extmark = vim.api.nvim_buf_set_extmark
   local buffer, namespace = target.buffer, self.namespace

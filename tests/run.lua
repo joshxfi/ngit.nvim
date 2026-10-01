@@ -1429,9 +1429,15 @@ test("session renders a real repository and closes cleanly", function()
   session:load_preview()
   equal(nil, session.current_diff)
   equal(nil, session.current_diff_models)
-  equal(nil, session.dashboard.preview.models)
+  -- The previous diff stays on screen until the new one replaces it, rather
+  -- than flashing a placeholder for a load that takes milliseconds.
+  local kept = vim.api.nvim_buf_get_lines(session.preview_buf, 0, -1, false)
+  truthy(table.concat(kept, "\n"):find("hello", 1, true), "the previous diff was cleared")
   local toggled = pcall(session.toggle_diff_layout, session)
   equal(true, toggled)
+  truthy(vim.wait(10000, function()
+    return session.current_diff_models ~= nil
+  end, 10))
   require("ngit").close()
   equal(nil, require("ngit")._active_session())
 end)
@@ -2642,6 +2648,201 @@ test("switching layouts keeps the cursor on the line being read", function()
     equal("side_by_side", preview.layout)
     equal(changed, vim.api.nvim_win_get_cursor(preview.right.window)[1])
   end)
+end)
+
+test("diff rows drop control characters and widen tabs", function()
+  local patch = table.concat({
+    "diff --git a/mixed.txt b/mixed.txt",
+    "--- a/mixed.txt",
+    "+++ b/mixed.txt",
+    "@@ -1,2 +1,2 @@",
+    "-\tindented\r",
+    "+bell\7 and escape\27 gone",
+    " plain line",
+    "",
+  }, "\n")
+  local view = require("ngit.ui.diff_view")
+  local split = view.split(require("ngit.git.diff").parse(patch, 10000), { title = "mixed" })
+  local body = table.concat(split.left.lines, "\n") .. "\n" .. table.concat(split.right.lines, "\n")
+  truthy(body:find("  indented", 1, true), "a tab was not widened")
+  truthy(body:find("bell and escape gone", 1, true), "a control character survived")
+  truthy(body:find("plain line", 1, true), "an ordinary line was altered")
+  truthy(not body:find("[\r\7\27\t]"), "raw control bytes reached the buffer")
+end)
+
+--- Opens a session over `count` modified files and waits for the first diff.
+local function changed_files_session(count, opts)
+  local root = repository()
+  for index = 1, count do
+    write_file(vim.fs.joinpath(root, ("f%02d.lua"):format(index)), "local value = 1\n")
+  end
+  git(root, { "add", "-A" })
+  git(root, { "commit", "-qm", "init" })
+  for index = 1, count do
+    write_file(vim.fs.joinpath(root, ("f%02d.lua"):format(index)), "local value = 2\n")
+  end
+  require("ngit").setup(opts or {})
+  require("ngit").open({ cwd = root })
+  truthy(vim.wait(10000, function()
+    local session = require("ngit")._active_session()
+    return session
+      and session.status
+      and #session.panels.status.entries == count
+      and session.current_diff_models ~= nil
+  end, 10))
+  return require("ngit")._active_session()
+end
+
+local function preview_text(session)
+  return table.concat(vim.api.nvim_buf_get_lines(session.preview_buf, 0, -1, false), "\n")
+end
+
+test("the next entry's diff loads in the background so stepping to it is instant", function()
+  local session = changed_files_session(4)
+  local entries = session.panels.status.entries
+  truthy(
+    vim.wait(10000, function()
+      return session.cache:has(session:cache_key(entries[2])) and not session.prefetching
+    end, 10),
+    "the neighbouring diff was never loaded ahead"
+  )
+
+  local runner = require("ngit.git.runner")
+  local original_run = runner.run
+  local spawned = 0
+  runner.run = function(...)
+    spawned = spawned + 1
+    return original_run(...)
+  end
+  local ok, err = pcall(function()
+    session:select_relative(1)
+    -- The diff is on screen before control returns, with no Git process started.
+    truthy(session.current_diff_models ~= nil, "the step waited for a load")
+    equal(0, spawned)
+    truthy(preview_text(session):find("f02.lua", 1, true), preview_text(session))
+  end)
+  runner.run = original_run
+  require("ngit").close()
+  require("ngit").setup()
+  if not ok then
+    error(err, 0)
+  end
+end)
+
+test("a single step loads at once and keeps the previous diff until it lands", function()
+  -- A debounce this long would be unmistakable if a lone step still waited it out.
+  local session = changed_files_session(6, { debounce_ms = 5000 })
+  local entries = session.panels.status.entries
+  -- As if the reader had paused after the last load.
+  session.last_preview_load = vim.uv.now() - 10000
+  local started = vim.uv.hrtime()
+  session:select_entry(entries[5])
+  equal(nil, session.current_diff_models)
+  -- No placeholder in between: the previous diff stays until it is replaced.
+  truthy(preview_text(session):find("f01.lua", 1, true), preview_text(session))
+  truthy(
+    vim.wait(4000, function()
+      return session.current_diff_models ~= nil
+    end, 5),
+    "the step waited for the debounce"
+  )
+  truthy((vim.uv.hrtime() - started) / 1e6 < 4000)
+  truthy(preview_text(session):find("f05.lua", 1, true), preview_text(session))
+  require("ngit").close()
+  require("ngit").setup()
+end)
+
+test("refreshing keeps loaded panels and the diff on screen until replaced", function()
+  local session = changed_files_session(3)
+  -- Every panel has loaded, including the empty Stashes panel.
+  truthy(vim.wait(10000, function()
+    for _, panel in pairs(session.panels) do
+      if panel.loading or panel.data == nil then
+        return false
+      end
+    end
+    return true
+  end, 10))
+  local Dashboard = require("ngit.ui.dashboard")
+  local original = Dashboard.render_panel
+  local placeholders = 0
+  Dashboard.render_panel = function(self, id, model)
+    if model.detail == "refreshing" then
+      placeholders = placeholders + 1
+    end
+    return original(self, id, model)
+  end
+  local ok, err = pcall(function()
+    session:refresh()
+    equal(0, placeholders)
+    truthy(preview_text(session):find("f01.lua", 1, true), "the diff was blanked by the refresh")
+    truthy(vim.wait(10000, function()
+      return session.current_diff_models ~= nil and not session.panels.status.loading
+    end, 10))
+    equal(3, #session.panels.status.entries)
+  end)
+  Dashboard.render_panel = original
+  require("ngit").close()
+  if not ok then
+    error(err, 0)
+  end
+end)
+
+test("the winbar position follows j and k", function()
+  local session = changed_files_session(3)
+  session:select_relative(1)
+  local winbar = vim.wo[session.dashboard.panels.status.window].winbar
+  truthy(winbar:find("2/3", 1, true), winbar)
+  require("ngit").close()
+end)
+
+test("re-rendering a diff of the same language keeps its highlighter", function()
+  if not pcall(vim.treesitter.language.add, "lua") then
+    return
+  end
+  local origin = vim.api.nvim_get_current_tabpage()
+  local previous_columns = vim.o.columns
+  vim.o.columns = 160
+  local dashboard = require("ngit.ui.dashboard").open(99996, require("ngit.config").defaults())
+  local view = require("ngit.ui.diff_view")
+  local function models(text)
+    local patch = table.concat({
+      "diff --git a/a.lua b/a.lua",
+      "--- a/a.lua",
+      "+++ b/a.lua",
+      "@@ -1 +1 @@",
+      "-local before = 1",
+      "+" .. text,
+      "",
+    }, "\n")
+    return { split = view.split(require("ngit.git.diff").parse(patch, 10000), {}) }
+  end
+  local ok, err = pcall(function()
+    local buffer = dashboard.preview.right.buffer
+    dashboard:render_diff(models("local first = 1"), "side_by_side", "lua")
+    local highlighter = vim.treesitter.highlighter.active[buffer]
+    truthy(highlighter, "highlighting did not start")
+    dashboard:render_diff(models("local second = 2"), "side_by_side", "lua")
+    truthy(vim.treesitter.highlighter.active[buffer] == highlighter, "the highlighter was rebuilt")
+    -- The reused highlighter still reads the new lines.
+    local lines = vim.api.nvim_buf_get_lines(buffer, 0, -1, false)
+    truthy(table.concat(lines, "\n"):find("local second = 2", 1, true))
+    dashboard:render_diff(models("local third = 3"), "side_by_side", nil)
+    equal(nil, vim.treesitter.highlighter.active[buffer])
+  end)
+  local tab = dashboard.tab
+  dashboard:dispose()
+  if vim.api.nvim_tabpage_is_valid(tab) then
+    vim.api.nvim_set_current_tabpage(tab)
+    vim.cmd("tabclose")
+  end
+  if vim.api.nvim_tabpage_is_valid(origin) then
+    vim.api.nvim_set_current_tabpage(origin)
+  end
+  vim.o.columns = previous_columns
+  if not ok then
+    error(err, 0)
+  end
 end)
 
 test("commit previews carry the message and stat into the scrollable body", function()

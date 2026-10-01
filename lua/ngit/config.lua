@@ -2,7 +2,7 @@ local M = {}
 
 ---@class NgitConfig
 ---@field context integer Number of context lines in generated diffs.
----@field debounce_ms integer Delay before loading a newly selected diff.
+---@field debounce_ms integer Minimum time between two preview loads.
 ---@field refresh_debounce_ms integer Delay used to coalesce repository refreshes.
 ---@field max_diff_bytes integer Soft limit for a preview before it is truncated.
 ---@field cache_entries integer Maximum number of cached file diffs.

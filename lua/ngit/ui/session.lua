@@ -20,6 +20,15 @@ Session.__index = Session
 
 local next_id = 0
 
+--- How long a diff may take to load before the preview says it is loading.
+--- Below this the previous diff is simply replaced, which reads as instant.
+local loading_notice_ms = 150
+
+--- Largest patch loaded ahead of the selection. Parsing runs on the main loop,
+--- so a patch loaded in the background must stay small enough never to delay a
+--- keypress; anything bigger loads when it is actually selected.
+local prefetch_max_bytes = 128 * 1024
+
 local section_order = { "conflict", "staged", "unstaged", "untracked", "range" }
 local section_titles = {
   conflict = "Conflicts",
@@ -198,6 +207,9 @@ function Session.new(root)
   -- they get a much shallower cache of their own. Holding only the handful of
   -- entries around the cursor is what makes j/k through a file list feel free.
   self.model_cache = Lru.new(4)
+  -- Entries whose patch was too large to load ahead, so they are not retried
+  -- every time the cursor passes them.
+  self.prefetch_skip = Lru.new(64)
   return self
 end
 
@@ -236,6 +248,9 @@ function Session:sync_active_aliases()
   if ui_panel then
     self.files_win = ui_panel.window
     self.files_buf = ui_panel.buffer
+    -- The winbar's "3/200" reads this copy; without it the position only
+    -- moved when the whole panel was redrawn, not on j and k.
+    ui_panel.selected = #panel.entries > 0 and panel.selected or 0
   end
 end
 
@@ -451,6 +466,7 @@ function Session:dispose()
     pcall(self.diff_job.kill, self.diff_job, 15)
     self.diff_job = nil
   end
+  self:cancel_prefetch()
   if self.status_job then
     pcall(self.status_job.kill, self.status_job, 15)
     self.status_job = nil
@@ -815,6 +831,7 @@ function Session:select_entry(target)
   for index, entry in ipairs(panel.entries) do
     if entry == target then
       if panel.selected ~= index then
+        self.travel = index < panel.selected and -1 or 1
         panel.selected = index
         self:sync_active_aliases()
         self.dashboard:refresh_winbars()
@@ -831,6 +848,7 @@ function Session:select_relative(delta)
   if #panel.entries == 0 then
     return
   end
+  self.travel = delta < 0 and -1 or 1
   panel.selected = ((panel.selected - 1 + delta) % #panel.entries) + 1
   self:sync_active_aliases()
   self.dashboard:refresh_winbars()
@@ -897,18 +915,41 @@ function Session:load_preview()
   end
 
   local title = self:preview_title(entry)
-  self.dashboard:render_preview({ "", ("  Loading %s…"):format(title) }, title)
+  self.loading_title = title
+  if self.dashboard.preview.models then
+    -- Painting a placeholder swaps every diff buffer to another filetype and
+    -- back, which costs more than most diffs take to load, and the flash of
+    -- "Loading" on every step reads as flicker. The previous diff stays until
+    -- this one replaces it, and the placeholder appears only when the load
+    -- takes long enough to notice.
+    vim.defer_fn(function()
+      if
+        not self.closed
+        and request == self.diff_request
+        and not self.current_diff_models
+        and not self.preview_error
+      then
+        self:show_loading()
+      end
+    end, loading_notice_ms)
+  else
+    self:show_loading()
+  end
 
-  vim.defer_fn(function()
-    if self.closed or request ~= self.diff_request or panel_id ~= self.active_panel then
+  local function current()
+    return not self.closed and request == self.diff_request and panel_id == self.active_panel
+  end
+  local function start()
+    if not current() then
       return
     end
+    self.last_preview_load = vim.uv.now()
     local preview_job
-    local function complete(diff, err)
+    preview_job = self:fetch_diff(entry, self.config.max_diff_bytes, function(diff, err)
       if self.diff_job == preview_job then
         self.diff_job = nil
       end
-      if self.closed or request ~= self.diff_request or panel_id ~= self.active_panel then
+      if not current() then
         return
       end
       if not diff then
@@ -918,44 +959,162 @@ function Session:load_preview()
       end
       self.cache:set(key, diff)
       self:render_preview(entry, diff)
-    end
-    if entry.kind == "commit" then
-      -- While following one file's history the patch is narrowed to it, so a
-      -- sweeping commit does not bury the file being read.
-      preview_job = log_backend.show(
-        self.root,
-        entry.commit.oid,
-        self.config.max_diff_bytes,
-        complete,
-        self.history and self.history.path or nil
-      )
-    elseif entry.kind == "branch" then
-      preview_job =
-        branch_backend.preview(self.root, entry.branch, self.config.max_diff_bytes, complete)
-    elseif entry.kind == "stash" then
-      preview_job = stash_backend.show(self.root, entry.stash, self.config.max_diff_bytes, complete)
-    elseif entry.section == "range" then
-      preview_job = range_backend.diff(
-        self.root,
-        self.range.spec,
-        entry.file.path,
-        self.config.context,
-        self.config.max_diff_bytes,
-        complete
-      )
-    else
-      preview_job = diff_backend.load(
-        self.root,
-        entry.section,
-        entry.file.path,
-        self.config.context,
-        self.config.max_diff_bytes,
-        complete,
-        { ignore_whitespace = self.config.ignore_whitespace }
-      )
-    end
+    end)
     self.diff_job = preview_job
-  end, self.config.debounce_ms)
+  end
+
+  -- This entry is already loading in the background. Taking that load over is
+  -- faster than starting a second Git process; only a patch too large to have
+  -- been loaded in full there needs loading again.
+  local pending = self.prefetching
+  if pending and pending.key == key then
+    pending.adopt = function(diff)
+      if not current() then
+        return false
+      end
+      if diff and not diff.truncated then
+        self:render_preview(entry, diff)
+      else
+        start()
+      end
+      return true
+    end
+    return
+  end
+
+  -- `debounce_ms` spaces out loads rather than delaying every one: a single
+  -- step loads at once, and only steps that follow a load closely, as when a
+  -- key is held, wait for the selection to settle.
+  local now = vim.uv.now()
+  local delay = now - (self.last_preview_load or -math.huge) >= self.config.debounce_ms and 0
+    or self.config.debounce_ms
+  vim.defer_fn(start, delay)
+end
+
+--- Starts the Git command that produces `entry`'s preview.
+---@param max_bytes integer
+---@param callback fun(diff: table?, err: string?)
+---@return vim.SystemObj?
+function Session:fetch_diff(entry, max_bytes, callback)
+  if entry.kind == "commit" then
+    -- While following one file's history the patch is narrowed to it, so a
+    -- sweeping commit does not bury the file being read.
+    return log_backend.show(
+      self.root,
+      entry.commit.oid,
+      max_bytes,
+      callback,
+      self.history and self.history.path or nil
+    )
+  elseif entry.kind == "branch" then
+    return branch_backend.preview(self.root, entry.branch, max_bytes, callback)
+  elseif entry.kind == "stash" then
+    return stash_backend.show(self.root, entry.stash, max_bytes, callback)
+  elseif entry.section == "range" then
+    return range_backend.diff(
+      self.root,
+      self.range.spec,
+      entry.file.path,
+      self.config.context,
+      max_bytes,
+      callback
+    )
+  end
+  return diff_backend.load(
+    self.root,
+    entry.section,
+    entry.file.path,
+    self.config.context,
+    max_bytes,
+    callback,
+    { ignore_whitespace = self.config.ignore_whitespace }
+  )
+end
+
+--- Loads the diffs on either side of the selection, the next one in the
+--- direction of travel first, one at a time.
+---
+--- A process started while the editor is idle runs several times slower than
+--- one started while it is busy: on an Apple M4 a `git diff` that takes 9 ms
+--- back to back takes 36 ms after a pause of a tenth of a second. Starting the
+--- neighbours' loads straight after the selected diff lands catches the
+--- machine while it is still busy, and the next step finds its diff cached.
+function Session:prefetch_neighbours()
+  if self.closed or self.prefetching then
+    return
+  end
+  local panel = self:active_state()
+  local travel = self.travel or 1
+  for _, index in ipairs({ panel.selected + travel, panel.selected - travel }) do
+    local entry = panel.entries[index]
+    if entry and self:prefetch_entry(entry) then
+      return
+    end
+  end
+end
+
+--- Starts loading `entry`'s diff in the background unless it is cached, known
+--- to be too large, or another background load is running.
+---@return boolean started
+function Session:prefetch_entry(entry)
+  local key = self:cache_key(entry)
+  if self.closed or self.prefetching or self.cache:has(key) or self.prefetch_skip:has(key) then
+    return false
+  end
+  local state = { key = key }
+  self.prefetching = state
+  state.job = self:fetch_diff(
+    entry,
+    math.min(prefetch_max_bytes, self.config.max_diff_bytes),
+    function(diff)
+      if self.prefetching ~= state then
+        return
+      end
+      self.prefetching = nil
+      if diff and not diff.truncated then
+        self.cache:set(key, diff)
+      else
+        self.prefetch_skip:set(key, true)
+      end
+      -- A taken-over load leads to a render, which carries on from there.
+      if not (state.adopt and state.adopt(diff)) then
+        self:prefetch_neighbours()
+      end
+    end
+  )
+  if not state.job and self.prefetching == state then
+    self.prefetching = nil
+  end
+  return true
+end
+
+function Session:cancel_prefetch()
+  local state = self.prefetching
+  self.prefetching = nil
+  if state and state.job then
+    pcall(state.job.kill, state.job, 15)
+  end
+end
+
+function Session:show_loading()
+  local title = self.loading_title or "Preview"
+  self.dashboard:render_preview({ "", ("  Loading %s…"):format(title) }, title)
+end
+
+--- Shows `message` in the preview, at once when nothing worth keeping is on
+--- show, otherwise only if no diff has replaced the one on show by the time a
+--- wait becomes noticeable.
+function Session:notice_later(message, title)
+  if not self.dashboard.preview.models then
+    self.dashboard:render_preview({ "", "  " .. message }, title)
+    return
+  end
+  local request = self.diff_request
+  vim.defer_fn(function()
+    if not self.closed and request == self.diff_request and not self.current_diff_models then
+      self.dashboard:render_preview({ "", "  " .. message }, title)
+    end
+  end, loading_notice_ms)
 end
 
 function Session:preview_title(entry)
@@ -986,6 +1145,12 @@ function Session:render_preview(entry, diff)
   self:render_diff_layout(self:target_diff_layout())
   self.preview_win = self.dashboard.preview.window
   self.preview_buf = self.dashboard.preview.buffer
+  -- Starting a process takes a few milliseconds of its own after a pause, so
+  -- it waits for the next turn of the event loop rather than holding up the
+  -- diff that was just drawn.
+  vim.defer_fn(function()
+    self:prefetch_neighbours()
+  end, 0)
 end
 
 --- The layout the preview should show now: a `dv` choice while it stands,
@@ -1141,8 +1306,13 @@ function Session:fit_preview()
       self:render_diff_layout(layout, true)
     else
       -- A loading or error message is on show; re-rendering the last diff
-      -- would paint over it.
+      -- would paint over it. A previous diff still waiting to be replaced is
+      -- swapped for the placeholder, since the other layout's buffers hold an
+      -- older diff still.
       dashboard:set_preview_layout(layout)
+      if dashboard.preview.models then
+        self:show_loading()
+      end
       dashboard:render_preview_header()
       self.preview_win = dashboard.preview.window
       self.preview_buf = dashboard.preview.buffer
